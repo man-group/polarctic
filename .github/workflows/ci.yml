@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest] #, macos-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"] #, "3.14"] ArcticDB is not available for Python 3.14 yet
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Install polarctic
+      run: |
+        pip install .[dev]
+    
+    - name: Type check with mypy
+      run: |
+        mypy polarctic
+    
+    - name: Test with pytest
+      run: |
+        pytest tests/ --cov=polarctic --cov-report=xml --cov-report=term
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./coverage.xml
+        fail_ci_if_error: false
+
