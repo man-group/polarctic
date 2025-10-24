@@ -72,7 +72,9 @@ class PolarsToArcticDBTranslator:
         def replace_dynamic(match: re.Match) -> Any:
             return match.group(2).strip()
         
-        return re.sub(pattern, replace_dynamic, expr)
+        update = re.sub(pattern, replace_dynamic, expr)
+        update = re.sub(r'\.not\(\)', r'.not_()', update)
+        return update
 
     def _process_node(self, node: ast.AST) -> Any:
         """Process an AST node and apply corresponding ArcticDB operation."""
@@ -112,8 +114,11 @@ class PolarsToArcticDBTranslator:
                     case 'negate':
                         new_node = ast.UnaryOp(ast.USub(), func.value)
                         return self._process_unaryop(new_node)
+                    case 'not_':
+                        new_node = ast.UnaryOp(ast.Invert(), func.value)
+                        return self._process_unaryop(new_node)
                     case _:
-                        raise NotImplementedError(f"Node.func type ast.Attribute not supported")
+                        raise NotImplementedError(f"Method {attr} not supported")
             case ast.Name:
                 # Function call like col('x')
                 func_name = cast(ast.Name, node.func).id

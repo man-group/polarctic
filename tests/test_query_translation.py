@@ -100,11 +100,10 @@ def test_or(translator):
     qe = qe[(qe["col1"] > 2) | (qe["col2"] < 3)]
     assert q == qe
 
-# TODO: fix
-#def test_not(translator):
-#    q = QueryBuilder()
-#    q = translator.translate(~pl.col("col1"), q)
-#    qe = QueryBuilder()
-#    qe = qe[~qe["col1"]]
-#    assert q == qe
+def test_not(translator):
+    q = QueryBuilder()
+    q = translator.translate(~pl.col("col1"), q)
+    qe = QueryBuilder()
+    qe = qe[~qe["col1"]]
+    assert q == qe
 
