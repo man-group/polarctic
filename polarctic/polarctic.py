@@ -106,21 +106,19 @@ class PolarsToArcticDBTranslator:
         func_type = type(node.func)
         match func_type:
             case ast.Attribute:
-                # TODO: rework this
-                # Method call like pl.col('x').sum()
-                #obj = self._process_node(node.func.value)
-                #method = node.func.attr
-                #args = [self._process_node(arg) for arg in node.args]
-                #kwargs = {kw.arg: self._process_node(kw.value) for kw in node.keywords}
-                
-                #return self._apply_method(obj, method, args, kwargs)
-                raise NotImplementedError(f"Node.func type ast.Attribute not supported")
-            
+                func = cast(ast.Attribute, node.func)
+                attr = func.attr
+                match attr:
+                    case 'negate':
+                        new_node = ast.UnaryOp(ast.USub(), func.value)
+                        return self._process_unaryop(new_node)
+                    case _:
+                        raise NotImplementedError(f"Node.func type ast.Attribute not supported")
             case ast.Name:
                 # Function call like col('x')
                 func_name = cast(ast.Name, node.func).id
                 args = [self._process_node(arg) for arg in node.args]
-                
+
                 if func_name == 'col':
                     return ExpressionNode.column_ref(args[0]) if args else None
             case _:

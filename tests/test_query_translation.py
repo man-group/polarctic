@@ -78,13 +78,12 @@ def test_modulo(translator):
     with pytest.raises(NotImplementedError):
         q = translator.translate(pl.col("col1") % pl.col("col2"), q)
 
-# TODO: fix
-#def test_negation(translator):
-#    q = QueryBuilder()
-#    q = translator.translate(-pl.col("col1"), q)
-#    qe = Querybuilder()
-#    qe = qe[-qe["col1"]]
-#    assert q == qe
+def test_negation(translator):
+    q = QueryBuilder()
+    q = translator.translate(-pl.col("col1"), q)
+    qe = QueryBuilder()
+    qe = qe[-qe["col1"]]
+    assert q == qe
 
 def test_and(translator):
     q = QueryBuilder()
