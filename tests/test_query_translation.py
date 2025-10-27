@@ -92,6 +92,10 @@ def test_and(translator):
     qe = qe[(qe["col1"] > 2) & (qe["col2"] < 3)]
     assert q == qe
 
+    q2 = QueryBuilder()
+    q2 = translator.translate((pl.col("col1") > 2).and_(pl.col("col2") < 3), q2)
+    assert q2 == qe
+
 
 def test_or(translator):
     q = QueryBuilder()
@@ -100,10 +104,38 @@ def test_or(translator):
     qe = qe[(qe["col1"] > 2) | (qe["col2"] < 3)]
     assert q == qe
 
+    q2 = QueryBuilder()
+    q2 = translator.translate((pl.col("col1") > 2).or_(pl.col("col2") < 3), q2)
+    assert q2 == qe
+
 def test_not(translator):
     q = QueryBuilder()
     q = translator.translate(~pl.col("col1"), q)
     qe = QueryBuilder()
     qe = qe[~qe["col1"]]
     assert q == qe
+
+def test_abs(translator):
+    q = QueryBuilder()
+    q = translator.translate(pl.col("col1").abs(), q)
+    qe = QueryBuilder()
+    qe = qe[abs(qe["col1"])]
+    assert q == qe
+
+def test_is_null(translator):
+    q = QueryBuilder()
+    q = translator.translate(pl.col("col1").is_null(), q)
+    qe = QueryBuilder()
+    qe = qe[qe["col1"].isnull()]
+    assert q == qe
+
+def test_is_not_null(translator):
+    q = QueryBuilder()
+    q = translator.translate(~pl.col("col1").is_null(), q)
+    qe = QueryBuilder()
+    qe = qe[~qe["col1"].isnull()]
+    assert q == qe
+    qe2 = QueryBuilder()
+    qe2 = qe2[qe2["col1"].notnull()]
+    assert(qe2 != qe)
 

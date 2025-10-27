@@ -117,6 +117,10 @@ class PolarsToArcticDBTranslator:
                     case 'not_':
                         new_node = ast.UnaryOp(ast.Invert(), func.value)
                         return self._process_unaryop(new_node)
+                    case 'abs':
+                        return ExpressionNode.compose(self._process_node(func.value), OperationType.ABS, None)
+                    case 'is_null':
+                        return ExpressionNode.compose(self._process_node(func.value), OperationType.ISNULL, None)
                     case _:
                         raise NotImplementedError(f"Method {attr} not supported")
             case ast.Name:
