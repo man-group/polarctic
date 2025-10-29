@@ -6,6 +6,7 @@ from arcticdb import Arctic, LibraryOptions, QueryBuilder, LazyDataFrame, Output
 from arcticdb.version_store.library import Library
 from arcticdb.version_store.processing import ExpressionNode
 from arcticdb_ext.version_store import OperationType
+from arcticdb_ext.util import RegexGeneric
 from typing import cast, Iterator, Any, Optional
 
 class PolarsToArcticDBTranslator:
@@ -121,6 +122,9 @@ class PolarsToArcticDBTranslator:
                         return ExpressionNode.compose(self._process_node(func.value), OperationType.ABS, None)
                     case 'is_null':
                         return ExpressionNode.compose(self._process_node(func.value), OperationType.ISNULL, None)
+                    case 'contains':
+                        arg = self._process_node(node.args[0])
+                        return ExpressionNode.compose(self._process_node(func.value), OperationType.REGEX_MATCH, RegexGeneric(arg))
                     case _:
                         raise NotImplementedError(f"Method {attr} not supported")
             case ast.Name:
@@ -139,12 +143,11 @@ class PolarsToArcticDBTranslator:
         obj = self._process_node(node.value)
         attr = node.attr
 
-        # Handle pl.col pattern
-        #if obj == 'pl' and attr == 'col':
-        #    return 'col'
-        
-        #return f"{obj}.{attr}"
-        raise NotImplementedError(f"{obj}.{attr}: Node type ast.Attribute not supported")
+        if attr == 'str':
+            # str is a namespace for string operations and can be ignored
+            return obj
+
+        raise NotImplementedError(f"Attribute {attr} not supported for object {obj}")
 
     def _process_compare(self, node: ast.Compare) -> Any:
         """Process comparison operations and apply filters."""

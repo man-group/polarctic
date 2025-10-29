@@ -139,3 +139,10 @@ def test_is_not_null(translator):
     qe2 = qe2[qe2["col1"].notnull()]
     assert(qe2 != qe)
 
+def test_regex_match(translator):
+    q = QueryBuilder()
+    q = translator.translate(pl.col("col1").str.contains("e+"), q)
+    qe = QueryBuilder()
+    qe = qe[qe["col1"].regex_match("e+")]
+    assert q == qe
+
