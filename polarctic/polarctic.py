@@ -2,6 +2,7 @@ import datetime as dt
 import ast
 import re
 import polars as pl
+import numpy as np
 from arcticdb import Arctic, LibraryOptions, QueryBuilder, LazyDataFrame, OutputFormat
 from arcticdb.version_store.library import Library
 from arcticdb.version_store.processing import ExpressionNode
@@ -12,7 +13,7 @@ from typing import cast, Iterator, Any, Optional
 class PolarsToArcticDBTranslator:
     """
     Translates Polars expressions to ArcticDB QueryBuilder operations.
-    
+
     Usage:
         translator = PolarsToArcticDBTranslator()
         qb = translator.translate(polars_expr, query_builder)
@@ -21,22 +22,22 @@ class PolarsToArcticDBTranslator:
     def translate(self, polars_expr: pl.Expr, query_builder: Any) -> Any:
         """
         Translate a Polars expression string to ArcticDB QueryBuilder operations.
-        
+
         Args:
             polars_expr: String representation of Polars expression
             query_builder: ArcticDB QueryBuilder instance
-            
+
         Returns:
             Modified QueryBuilder instance
         """
-        
+
         # Clean the expression - remove surrounding brackets if present
         expr = str(polars_expr).strip()
         if expr.startswith('[') and expr.endswith(']'):
             expr = expr[1:-1].strip()
 
         expr = self._replace_square_brackets(expr)
-        
+
         # Preprocess to handle Polars-specific notation like [dyn int: 2]
         expr = self._preprocess_expression(expr)
 
@@ -46,9 +47,9 @@ class PolarsToArcticDBTranslator:
             expr_node = self._process_node(tree.body)
         except SyntaxError as e:
             raise ValueError(f"Invalid Polars expression: {polars_expr}") from e
-        
+
         return query_builder[expr_node]
-        
+
     def _replace_square_brackets(self, text: str) -> str:
         while True:
             close = text.rfind('])')
@@ -60,19 +61,19 @@ class PolarsToArcticDBTranslator:
             # Replace the matched ([...]) with (...)
             text = text[:open_] + '(' + text[open_ + 2:close] + ')' + text[close + 2:]
         return text
-    
+
     def _preprocess_expression(self, expr: str) -> str:
         """
         Preprocess Polars expression to handle special notation.
-        
+
         Converts patterns like [dyn int: 2] to just the value (2).
         """
         # Pattern to match [dyn type: value] or [lit type: value]
         pattern = r'[\[\(](dyn|lit)\s+\w+:\s*([^\]\)]+)[\]\)]'
-        
+
         def replace_dynamic(match: re.Match) -> Any:
-            return match.group(2).strip()
-        
+            return f"({match.group(2).strip()})"
+
         update = re.sub(pattern, replace_dynamic, expr)
         update = re.sub(r'\.not\(\)', r'.not_()', update)
         return update
@@ -124,7 +125,15 @@ class PolarsToArcticDBTranslator:
                         return ExpressionNode.compose(self._process_node(func.value), OperationType.ISNULL, None)
                     case 'contains':
                         arg = self._process_node(node.args[0])
-                        return ExpressionNode.compose(self._process_node(func.value), OperationType.REGEX_MATCH, RegexGeneric(arg))
+                        left = self._process_node(func.value)
+                        if left[1] == 'str':
+                            return ExpressionNode.compose(left[0], OperationType.REGEX_MATCH, RegexGeneric(arg))
+                        else:
+                            raise NotImplementedError(f"Method {attr} not supported")
+                    case 'is_in':
+                        arg_list = [self._process_node(arg) for arg in node.args]
+                        left = self._process_node(func.value)
+                        return ExpressionNode.compose(left, OperationType.ISIN, np.array(arg_list))
                     case _:
                         raise NotImplementedError(f"Method {attr} not supported")
             case ast.Name:
@@ -143,17 +152,16 @@ class PolarsToArcticDBTranslator:
         obj = self._process_node(node.value)
         attr = node.attr
 
-        if attr == 'str':
-            # str is a namespace for string operations and can be ignored
-            return obj
+        if attr in ['str']:
+            return (obj, attr)
 
         raise NotImplementedError(f"Attribute {attr} not supported for object {obj}")
 
     def _process_compare(self, node: ast.Compare) -> Any:
         """Process comparison operations and apply filters."""
-        
+
         left = self._process_node(node.left)
-        
+
         # Handle multiple comparisons
         for op, comparator in zip(node.ops, node.comparators):
             right = self._process_node(comparator)
@@ -180,14 +188,14 @@ class PolarsToArcticDBTranslator:
                 case _:
                     raise NotImplementedError(f"Operator {op_type} not supported")
             left = expr_node
-        
+
         return expr_node
 
     def _process_binop(self, node: ast.BinOp) -> Any:
         """Process binary operations."""
-        
+
         left = self._process_node(node.left)
-        
+
         right = self._process_node(node.right)
         op_type = type(node.op)
 
@@ -210,10 +218,10 @@ class PolarsToArcticDBTranslator:
                 return ExpressionNode.compose(left, OperationType.AND, right)
             case _:
                 raise NotImplementedError(f"Operator {op_type} not supported")
-    
+
     def _process_unaryop(self, node: ast.UnaryOp) -> Any:
         """Process unary operations."""
-        
+
         operand = self._process_node(node.operand)
         op_type = type(node.op)
 
@@ -224,7 +232,7 @@ class PolarsToArcticDBTranslator:
                 return ExpressionNode.compose(operand, OperationType.NEG, None)
             case _:
                 raise NotImplementedError(f"Operator {op_type} not supported")
-            
+
         return None
 
 def parse_schema(
@@ -259,7 +267,7 @@ def scan_arcticdb(
             tl = PolarsToArcticDBTranslator()
             qb = QueryBuilder()
             qb = tl.translate(predicate, qb)
-        
+
         # TODO: convert predicate to QueryBuilder and pass it to read
         lazy_df = lib.read(symbol, as_of = as_of, columns = with_columns, query_builder = qb, lazy = True, output_format=OutputFormat.EXPERIMENTAL_ARROW)
 
@@ -268,7 +276,7 @@ def scan_arcticdb(
 
         if n_rows is not None:
             batch_size = min(batch_size, n_rows)
-        
+
         read_idx = 0
         while n_rows is None or n_rows > 0:
             lazy_df_slice = lazy_df.row_range((read_idx, read_idx + batch_size))

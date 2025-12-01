@@ -146,3 +146,9 @@ def test_regex_match(translator):
     qe = qe[qe["col1"].regex_match("e+")]
     assert q == qe
 
+def test_isin(translator):
+    q = QueryBuilder()
+    q = translator.translate(pl.col("col1").is_in([24, 42]), q)
+    qe = QueryBuilder()
+    qe = qe[qe["col1"].isin(24, 42)]
+    assert(q == qe)
