@@ -268,7 +268,6 @@ def scan_arcticdb(
             qb = QueryBuilder()
             qb = tl.translate(predicate, qb)
 
-        # TODO: convert predicate to QueryBuilder and pass it to read
         lazy_df = lib.read(symbol, as_of = as_of, columns = with_columns, query_builder = qb, lazy = True, output_format=OutputFormat.EXPERIMENTAL_ARROW)
 
         if batch_size is None:
