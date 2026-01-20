@@ -8,14 +8,11 @@ version = "0.1.0"
 description = "Python plugin to read ArcticDB frames from polars"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "Apache-2.0"}
+license = {text = "BSL"}
 authors = [
     {name = "Johan Mabille", email = "johan.mabille@gmail.com"}
 ]
 classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -41,10 +38,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/JohanMabille/polarctic"
-Documentation = "https://github.com/JohanMabille/polarctic#readme"
-Repository = "https://github.com/JohanMabille/polarctic"
-Issues = "https://github.com/JohanMabille/polarctic/issues"
+Homepage = "https://github.com/man-group/polarctic"
+Documentation = "https://github.com/man-group/polarctic#readme"
+Repository = "https://github.com/man-group/polarctic"
+Issues = "https://github.com/man-group/polarctic/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
