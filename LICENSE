@@ -2,7 +2,7 @@
 
 Licensor:             Man Group Operations Limited
 
-Licensed Work:        ArcticDB 
+Licensed Work:        polarctic 
 
 Additional Use Grant: You may make use of the Licensed Work under the 
                       terms of this License, provided that you may not 
@@ -14,12 +14,12 @@ Additional Use Grant: You may make use of the Licensed Work under the
                       Licensed Work by creating tables whose schemas are 
                       controlled by such third parties.
 
-Change Date:          For ArcticDB version 1.0 and all later version 
+Change Date:          For polarctic version 1.0 and all later version 
                       releases the change date is two years as of the 
                       release date of the respective version with the
                       two-year term beginning for each individual version
                       on the release date. Please see 
-                      https://github.com/man-group/ArcticDB#license for 
+                      https://github.com/man-group/polarctic#license for 
                       version release notes. 
 
 Change License:       Apache License, version 2.0
