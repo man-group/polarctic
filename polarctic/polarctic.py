@@ -240,7 +240,7 @@ def parse_schema(
     symbol: str,
     as_of: int | str | dt.datetime | None = None
 ) -> pl.Schema:
-    arrow_df = lib.read(symbol, as_of=as_of, output_format=OutputFormat.EXPERIMENTAL_ARROW, row_range=((0,1))).data
+    arrow_df = lib.read(symbol, as_of=as_of, output_format=OutputFormat.PYARROW, row_range=((0,1))).data
     return pl.Schema(arrow_df.schema) 
 
 def scan_arcticdb(
@@ -268,7 +268,7 @@ def scan_arcticdb(
             qb = QueryBuilder()
             qb = tl.translate(predicate, qb)
 
-        lazy_df = lib.read(symbol, as_of = as_of, columns = with_columns, query_builder = qb, lazy = True, output_format=OutputFormat.EXPERIMENTAL_ARROW)
+        lazy_df = lib.read(symbol, as_of = as_of, columns = with_columns, query_builder = qb, lazy = True, output_format=OutputFormat.PYARROW)
 
         if batch_size is None:
             batch_size = 1000
