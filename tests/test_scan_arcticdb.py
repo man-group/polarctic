@@ -83,3 +83,16 @@ def test_scan_articdb_with_filter(init_arcticdb, delete_arcticdb):
             arctic_df: VersionedItem = lib.read(symbol, query_builder = query_builder, output_format = OutputFormat.PANDAS)
             pdt.assert_frame_equal(pd_df, arctic_df.data, check_dtype=False, check_like=True)
 
+def test_scan_arcticdb_with_select(init_arcticdb, delete_arcticdb):
+    info = init_arcticdb
+    uri = info["uri"]
+    lib = info["lib"]
+    lib_name = info["lib_name"]
+    expected_tables: dict = info["tables"]
+
+    for symbol, expected_df in expected_tables.items():
+        lazy: pl.LazyFrame = polarctic_module.scan_arcticdb(uri, lib_name, symbol)
+        pl_df: pl.DataFrame = lazy.select(pl.col("a"), pl.col("b")).collect()
+        pd_df: pd.DataFrame = pl_df.to_pandas()
+        pdt.assert_frame_equal(pd_df, expected_df[["a", "b"]], check_dtype=False, check_like=True)
+
