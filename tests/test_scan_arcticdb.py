@@ -108,41 +108,54 @@ def test_scan_arcticdb_unsupported_predicate_falls_back_to_polars(init_arcticdb,
     lib_name = info["lib_name"]
     expected_tables: dict = info["tables"]
 
-    # Confirm the predicate cannot be translated before relying on the fallback.
     predicate = pl.col("a") % 2 == 0
-    with pytest.raises(NotImplementedError):
-        polarctic_module.PolarsToArcticDBTranslator().translate(predicate, QueryBuilder())
+    with patch.object(
+        polarctic_module.PolarsToArcticDBTranslator,
+        "translate",
+        side_effect=NotImplementedError("forced translation failure"),
+    ):
+        for symbol, expected_df in expected_tables.items():
+            lazy: pl.LazyFrame = polarctic_module.scan_arcticdb(uri, lib_name, symbol)
+            pl_df: pl.DataFrame = lazy.filter(predicate).collect()
+            pd_df: pd.DataFrame = pl_df.to_pandas()
 
-    for symbol, expected_df in expected_tables.items():
-        lazy: pl.LazyFrame = polarctic_module.scan_arcticdb(uri, lib_name, symbol)
-        pl_df: pl.DataFrame = lazy.filter(predicate).collect()
-        pd_df: pd.DataFrame = pl_df.to_pandas()
-
-        expected = expected_df[expected_df["a"] % 2 == 0].reset_index(drop=True)
-        pdt.assert_frame_equal(pd_df, expected, check_dtype=False, check_like=True)
+            expected = expected_df[expected_df["a"] % 2 == 0].reset_index(drop=True)
+            pdt.assert_frame_equal(pd_df, expected, check_dtype=False, check_like=True)
 
 
 def test_scan_arcticdb_unsupported_predicate_skips_arcticdb_pushdown(init_arcticdb, delete_arcticdb):
     """
     When the predicate cannot be translated, query_builder passed to lib.read
-    must be None (no pushdown attempted), and the Polars filter is applied instead.
+    must be None on lazy reads (no pushdown attempted), and the Polars filter is
+    applied instead.
     """
     info = init_arcticdb
     uri = info["uri"]
+    lib = info["lib"]
     lib_name = info["lib_name"]
 
     predicate = pl.col("a") % 2 == 0
-    # Confirm the predicate cannot be translated before relying on the fallback.
-    with pytest.raises(NotImplementedError):
-        polarctic_module.PolarsToArcticDBTranslator().translate(predicate, QueryBuilder())
-
-    with patch.object(polarctic_module.PolarsToArcticDBTranslator, "translate",
-                      side_effect=NotImplementedError("modulo not supported")) as mock_translate:
+    with patch.object(
+        polarctic_module.Arctic,
+        "get_library",
+        return_value=lib,
+    ), patch.object(lib, "read", wraps=lib.read) as mock_read, patch.object(
+        polarctic_module.PolarsToArcticDBTranslator,
+        "translate",
+        side_effect=NotImplementedError("forced translation failure"),
+    ) as mock_translate:
         lazy: pl.LazyFrame = polarctic_module.scan_arcticdb(uri, lib_name, "df1")
         pl_df: pl.DataFrame = lazy.filter(predicate).collect()
 
     # Translation was attempted exactly once
     mock_translate.assert_called_once()
+
+    # For lazy reads, no ArcticDB query_builder pushdown should be attempted.
+    lazy_read_calls = [
+        call for call in mock_read.call_args_list if call.kwargs.get("lazy") is True
+    ]
+    assert lazy_read_calls
+    assert all(call.kwargs.get("query_builder") is None for call in lazy_read_calls)
 
     # Results are still correct (Polars fallback applied)
     expected = info["tables"]["df1"]
@@ -159,12 +172,13 @@ def test_scan_arcticdb_unsupported_predicate_combined_with_column_select(init_ar
     lib_name = info["lib_name"]
 
     predicate = pl.col("a") % 2 == 0
-    # Confirm the predicate cannot be translated before relying on the fallback.
-    with pytest.raises(NotImplementedError):
-        polarctic_module.PolarsToArcticDBTranslator().translate(predicate, QueryBuilder())
-
-    lazy: pl.LazyFrame = polarctic_module.scan_arcticdb(uri, lib_name, "df1")
-    pl_df: pl.DataFrame = lazy.filter(predicate).select("a", "b").collect()
+    with patch.object(
+        polarctic_module.PolarsToArcticDBTranslator,
+        "translate",
+        side_effect=NotImplementedError("forced translation failure"),
+    ):
+        lazy: pl.LazyFrame = polarctic_module.scan_arcticdb(uri, lib_name, "df1")
+        pl_df: pl.DataFrame = lazy.filter(predicate).select("a", "b").collect()
 
     expected = info["tables"]["df1"]
     expected = expected[expected["a"] % 2 == 0][["a", "b"]].reset_index(drop=True)
