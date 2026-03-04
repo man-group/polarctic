@@ -19,6 +19,7 @@ Dependencies (imported at module import time, not lazily):
 Each test takes both fixtures init_arcticdb and delete_arcticdb so setup runs
 before the test and teardown removes the LMDB store afterwards.
 """
+import sys
 from unittest.mock import patch
 
 import pandas as pd
@@ -168,3 +169,23 @@ def test_scan_arcticdb_unsupported_predicate_combined_with_column_select(init_ar
     expected = info["tables"]["df1"]
     expected = expected[expected["a"] % 2 == 0][["a", "b"]].reset_index(drop=True)
     pdt.assert_frame_equal(pl_df.to_pandas(), expected, check_dtype=False, check_like=True)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only LMDB lock-file stress test")
+@pytest.mark.parametrize("iteration", range(8))
+def test_scan_arcticdb_windows_cleanup_stress(init_arcticdb, delete_arcticdb, iteration):
+    """
+    Stress fixture setup/teardown on Windows to catch intermittent LMDB lock-file
+    cleanup issues in CI.
+    """
+    info = init_arcticdb
+    uri = info["uri"]
+    lib_name = info["lib_name"]
+    expected = info["tables"]["df1"]
+
+    predicate = pl.col("a") % 2 == 0
+    lazy: pl.LazyFrame = polarctic_module.scan_arcticdb(uri, lib_name, "df1")
+    pd_df: pd.DataFrame = lazy.filter(predicate).collect().to_pandas()
+
+    expected = expected[expected["a"] % 2 == 0].reset_index(drop=True)
+    pdt.assert_frame_equal(pd_df, expected, check_dtype=False, check_like=True)
