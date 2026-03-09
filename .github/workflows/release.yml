@@ -1,0 +1,127 @@
+name: Release and Publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: 'Type of version bump'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      custom_version:
+        description: 'Custom version (optional, overrides version_type)'
+        required: false
+        type: string
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        lfs: true
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v6
+      with:
+        node-version: '20'
+    
+    - name: Install npm dependencies and build JS
+      run: |
+        npm install
+        npm run build
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v7
+      with:
+        version: "latest"
+        python-version: "3.14"
+
+    - name: Install dependencies
+      run: |
+        uv sync --all-extras
+
+    - name: Get current version
+      id: current_version
+      run: |
+        $version = uv run python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])"
+        echo "version=$version" >> $env:GITHUB_OUTPUT
+      shell: pwsh
+
+    - name: Calculate new version
+      id: new_version
+      run: |
+        $currentVersion = "${{ steps.current_version.outputs.version }}"
+        $customVersion = "${{ github.event.inputs.custom_version }}"
+        $versionType = "${{ github.event.inputs.version_type }}"
+
+        if ($customVersion) {
+            $newVersion = $customVersion
+        } else {
+            $parts = $currentVersion.Split('.')
+            $major = [int]$parts[0]
+            $minor = [int]$parts[1]
+            $patch = [int]$parts[2]
+
+            switch ($versionType) {
+                "major" { $major++; $minor = 0; $patch = 0 }
+                "minor" { $minor++; $patch = 0 }
+                "patch" { $patch++ }
+            }
+
+            $newVersion = "$major.$minor.$patch"
+        }
+
+        echo "version=$newVersion" >> $env:GITHUB_OUTPUT
+        echo "New version will be: $newVersion"
+      shell: pwsh
+
+    - name: Update version in pyproject.toml
+      run: |
+        $newVersion = "${{ steps.new_version.outputs.version }}"
+        $content = Get-Content pyproject.toml -Raw
+        $updated = $content -replace '(?m)^(version = "[^"]*")', "version = `"$newVersion`""
+        Set-Content pyproject.toml -Value $updated -NoNewline
+        echo "Updated version to $newVersion"
+      shell: pwsh
+
+    - name: Run tests
+      run: |
+        uv run pytest tests/ -v
+
+    - name: Build package
+      run: |
+        uv build
+
+    - name: Commit version bump
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add pyproject.toml
+        git commit -m "Bump version to ${{ steps.new_version.outputs.version }}"
+
+    - name: Create and push tag
+      run: |
+        $tag = "v${{ steps.new_version.outputs.version }}"
+        git tag $tag
+        git push origin main
+        git push origin $tag
+        echo "Created and pushed tag: $tag"
+      shell: pwsh
+
+    - name: Create GitHub Release
+      uses: elgohr/Github-Release-Action@v5
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        title: Release v${{ steps.new_version.outputs.version }}
+        tag: v${{ steps.new_version.outputs.version }}

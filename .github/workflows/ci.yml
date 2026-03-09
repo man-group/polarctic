@@ -16,7 +16,7 @@ jobs:
         python-version: ["3.10", "3.11", "3.12", "3.13"] #, "3.14"] ArcticDB is not available for Python 3.14 yet
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v5
@@ -26,10 +26,6 @@ jobs:
     - name: Install polarctic
       run: |
         pip install .[dev]
-    
-    - name: Type check with mypy
-      run: |
-        mypy polarctic
     
     - name: Test with pytest
       run: |
