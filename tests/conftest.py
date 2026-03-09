@@ -6,13 +6,16 @@ Use of this software is governed by the Business Source License 1.1 included in 
 As of the Change Date specified in that file, in accordance with the Business Source License, use of this software will be governed by the Apache License, version 2.0.
 """
 
-import pytest
+import gc
 import shutil
-from polarctic.polarctic import PolarsToArcticDBTranslator
-from arcticdb import Arctic
+import time
 from pathlib import Path
-import pandas as pd
+
 import numpy as np
+import pandas as pd
+import pytest
+from arcticdb import Arctic
+from polarctic.polarctic import PolarsToArcticDBTranslator
 
 @pytest.fixture
 def translator():
@@ -69,15 +72,32 @@ def delete_arcticdb(init_arcticdb):
     Tests should include this fixture in the parameter list to ensure cleanup.
     """
     yield
-    # delete library
-    ac = init_arcticdb["ac"]
     lib_name = init_arcticdb["lib_name"]
-    ac.delete_library(lib_name)
-
-    # remove directory
     lmdb_path = init_arcticdb["lmdb_path"]
-    try:
-        shutil.rmtree(lmdb_path)
-    except Exception:
-        # best-effort cleanup; ignore errors
-        pass
+    ac = init_arcticdb["ac"]
+
+    # Drop strong references held by the fixture dict before deleting on-disk state.
+    init_arcticdb.pop("lib", None)
+    init_arcticdb.pop("tables", None)
+    gc.collect()
+
+    # Windows may keep LMDB lock files briefly; retry deletion a few times.
+    for _ in range(10):
+        try:
+            ac.delete_library(lib_name)
+            break
+        except Exception:
+            gc.collect()
+            time.sleep(0.1)
+
+    init_arcticdb.pop("ac", None)
+    del ac
+    gc.collect()
+
+    for _ in range(10):
+        try:
+            shutil.rmtree(lmdb_path)
+            break
+        except Exception:
+            gc.collect()
+            time.sleep(0.1)
