@@ -19,7 +19,6 @@ from arcticdb import Arctic, LazyDataFrame, OutputFormat, QueryBuilder
 from arcticdb.version_store.library import Library, ReadRequest
 from arcticdb.version_store.processing import ExpressionNode
 from arcticdb_ext.util import RegexGeneric
-from arcticdb_ext.util import RegexGeneric
 from arcticdb_ext.version_store import OperationType
 
 default_batch_size: int = 1000
@@ -180,8 +179,6 @@ class PolarsToArcticDBTranslator:
         """Process comparison operations and apply filters."""
 
         left = self._process_node(node.left)
-
-        expr_node = None
 
         # Handle multiple comparisons
         expr_node: Any = None
