@@ -260,7 +260,8 @@ def scan_arcticdb(
     ac = Arctic(uri)
     lib = ac.get_library(lib_name)
 
-    schema = parse_schema(lib, symbol, as_of)
+    def schema() -> pl.Schema:
+        return parse_schema(lib, symbol, as_of)
 
     def source_generator(
         with_columns: list[str] | None,
@@ -295,4 +296,4 @@ def scan_arcticdb(
 
             yield cast(pl.DataFrame, pl.from_arrow(arrow_df))
 
-    return pl.io.plugins.register_io_source(io_source=source_generator, schema = schema)    
+    return pl.io.plugins.register_io_source(io_source=source_generator, schema = schema)
