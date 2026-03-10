@@ -126,8 +126,16 @@ def test_and(translator: PolarsToArcticDBTranslator) -> None:
     assert q2 == qe
 
 
-def test_or(translator: PolarsToArcticDBTranslator) -> None:
-    q = make_query_builder()
+def test_bitwise_and_integer(translator: PolarsToArcticDBTranslator) -> None:
+    q = QueryBuilder()
+    q = translator.translate((pl.col("col1") & 1) == 0, q)
+    qe: Any = QueryBuilder()
+    qe = qe[(qe["col1"] & 1) == 0]
+    assert q == qe
+
+
+def test_or(translator):
+    q = QueryBuilder()
     q = translator.translate((pl.col("col1") > 2) | (pl.col("col2") < 3), q)
     qe = make_query_builder()
     qe = qe[(qe["col1"] > 2) | (qe["col2"] < 3)]
@@ -138,8 +146,23 @@ def test_or(translator: PolarsToArcticDBTranslator) -> None:
     assert q2 == qe
 
 
-def test_not(translator: PolarsToArcticDBTranslator) -> None:
-    q = make_query_builder()
+def test_bitwise_or_integer(translator: PolarsToArcticDBTranslator) -> None:
+    q = QueryBuilder()
+    q = translator.translate((pl.col("col1") | 1) == 3, q)
+    qe: Any = QueryBuilder()
+    qe = qe[(qe["col1"] | 1) == 3]
+    assert q == qe
+
+
+def test_bitwise_xor_integer(translator: PolarsToArcticDBTranslator) -> None:
+    q = QueryBuilder()
+    q = translator.translate((pl.col("col1") ^ 1) == 3, q)
+    qe: Any = QueryBuilder()
+    qe = qe[(qe["col1"] ^ 1) == 3]
+    assert q == qe
+
+def test_not(translator):
+    q = QueryBuilder()
     q = translator.translate(~pl.col("col1"), q)
     qe = make_query_builder()
     qe = qe[~qe["col1"]]

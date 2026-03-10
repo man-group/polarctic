@@ -227,14 +227,14 @@ class PolarsToArcticDBTranslator:
                 return ExpressionNode.compose(left, OperationType.MUL, right)
             case ast.Div:
                 return ExpressionNode.compose(left, OperationType.DIV, right)
-            # TODO: operator & and | can be used for boolean operations between
-            # filters, or bitwise operations between integers values. The current
-            # implementation supports boolean operations only (which should be
-            # the most common case)
+            # ArcticDB overloads AND/OR/XOR for both boolean filter composition
+            # and integer bitwise expressions, so the same mapping handles both.
             case ast.BitOr:
                 return ExpressionNode.compose(left, OperationType.OR, right)
             case ast.BitAnd:
                 return ExpressionNode.compose(left, OperationType.AND, right)
+            case ast.BitXor:
+                return ExpressionNode.compose(left, OperationType.XOR, right)
             case _:
                 raise NotImplementedError(f"Operator {op_type} not supported")
 
