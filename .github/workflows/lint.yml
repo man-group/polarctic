@@ -26,6 +26,6 @@ jobs:
       run: |
         ruff check polarctic tests
 
-    - name: Check formatting with black
+    - name: Check formatting with ruff
       run: |
-        black --check polarctic tests
+        ruff format --check polarctic tests
