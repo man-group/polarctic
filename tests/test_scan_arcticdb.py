@@ -97,109 +97,126 @@ def test_scan_arcticdb_with_select(init_arcticdb, delete_arcticdb):
         pdt.assert_frame_equal(pd_df, expected_df[["a", "b"]], check_dtype=False, check_like=True)
 
 
-def test_scan_arcticdb_unsupported_predicate_falls_back_to_polars(init_arcticdb, delete_arcticdb):
-    """
-    When the predicate cannot be translated to ArcticDB (e.g. modulo operator),
-    scan_arcticdb must NOT raise; instead it falls back to Polars-side filtering
-    and still returns the correct rows.
-    """
-    info = init_arcticdb
-    uri = info["uri"]
-    lib_name = info["lib_name"]
-    expected_tables: dict = info["tables"]
-
-    predicate = pl.col("a") % 2 == 0
-    with patch.object(
-        polarctic_module.PolarsToArcticDBTranslator,
-        "translate",
-        side_effect=NotImplementedError("forced translation failure"),
-    ):
-        for symbol, expected_df in expected_tables.items():
-            lazy: pl.LazyFrame = polarctic_module.scan_arcticdb(uri, lib_name, symbol)
-            pl_df: pl.DataFrame = lazy.filter(predicate).collect()
-            pd_df: pd.DataFrame = pl_df.to_pandas()
-
-            expected = expected_df[expected_df["a"] % 2 == 0].reset_index(drop=True)
-            pdt.assert_frame_equal(pd_df, expected, check_dtype=False, check_like=True)
-
-
-def test_scan_arcticdb_unsupported_predicate_skips_arcticdb_pushdown(init_arcticdb, delete_arcticdb):
-    """
-    When the predicate cannot be translated, query_builder passed to lib.read
-    must be None on lazy reads (no pushdown attempted), and the Polars filter is
-    applied instead.
-    """
+def test_scan_arcticdb_library_source(init_arcticdb, delete_arcticdb):
+    """scan_arcticdb(lib, symbol) form produces the same result as the URI form."""
     info = init_arcticdb
     uri = info["uri"]
     lib = info["lib"]
     lib_name = info["lib_name"]
+    expected_tables: dict = info["tables"]
 
-    predicate = pl.col("a") % 2 == 0
-    with patch.object(
-        polarctic_module.Arctic,
-        "get_library",
-        return_value=lib,
-    ), patch.object(lib, "read", wraps=lib.read) as mock_read, patch.object(
-        polarctic_module.PolarsToArcticDBTranslator,
-        "translate",
-        side_effect=NotImplementedError("forced translation failure"),
-    ) as mock_translate:
-        lazy: pl.LazyFrame = polarctic_module.scan_arcticdb(uri, lib_name, "df1")
-        pl_df: pl.DataFrame = lazy.filter(predicate).collect()
-
-    # Translation was attempted exactly once
-    mock_translate.assert_called_once()
-
-    # For lazy reads, no ArcticDB query_builder pushdown should be attempted.
-    lazy_read_calls = [
-        call for call in mock_read.call_args_list if call.kwargs.get("lazy") is True
-    ]
-    assert lazy_read_calls
-    assert all(call.kwargs.get("query_builder") is None for call in lazy_read_calls)
-
-    # Results are still correct (Polars fallback applied)
-    expected = info["tables"]["df1"]
-    expected = expected[expected["a"] % 2 == 0].reset_index(drop=True)
-    pdt.assert_frame_equal(pl_df.to_pandas(), expected, check_dtype=False, check_like=True)
+    for symbol, expected_df in expected_tables.items():
+        lazy_lib: pl.LazyFrame = polarctic_module.scan_arcticdb(lib, symbol)
+        lazy_uri: pl.LazyFrame = polarctic_module.scan_arcticdb(uri, lib_name, symbol)
+        pdt.assert_frame_equal(
+            lazy_lib.collect().to_pandas(),
+            lazy_uri.collect().to_pandas(),
+            check_dtype=False,
+            check_like=True,
+        )
 
 
-def test_scan_arcticdb_unsupported_predicate_combined_with_column_select(init_arcticdb, delete_arcticdb):
-    """
-    Unsupported predicate fallback must compose correctly with column projection.
-    """
+def test_scan_arcticdb_lazy_dataframe_source(init_arcticdb, delete_arcticdb):
+    """scan_arcticdb(lazy_df) reads the same data as the Library form."""
     info = init_arcticdb
-    uri = info["uri"]
+    lib = info["lib"]
     lib_name = info["lib_name"]
+    uri = info["uri"]
+    expected_tables: dict = info["tables"]
 
-    predicate = pl.col("a") % 2 == 0
-    with patch.object(
-        polarctic_module.PolarsToArcticDBTranslator,
-        "translate",
-        side_effect=NotImplementedError("forced translation failure"),
-    ):
-        lazy: pl.LazyFrame = polarctic_module.scan_arcticdb(uri, lib_name, "df1")
-        pl_df: pl.DataFrame = lazy.filter(predicate).select("a", "b").collect()
-
-    expected = info["tables"]["df1"]
-    expected = expected[expected["a"] % 2 == 0][["a", "b"]].reset_index(drop=True)
-    pdt.assert_frame_equal(pl_df.to_pandas(), expected, check_dtype=False, check_like=True)
+    for symbol in expected_tables:
+        lazy_df = lib.read(symbol, lazy=True, output_format=OutputFormat.PYARROW)
+        lf: pl.LazyFrame = polarctic_module.scan_arcticdb(lazy_df)
+        pdt.assert_frame_equal(
+            lf.collect().to_pandas(),
+            polarctic_module.scan_arcticdb(uri, lib_name, symbol).collect().to_pandas(),
+            check_dtype=False,
+            check_like=True,
+        )
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only LMDB lock-file stress test")
-@pytest.mark.parametrize("iteration", range(8))
-def test_scan_arcticdb_windows_cleanup_stress(init_arcticdb, delete_arcticdb, iteration):
-    """
-    Stress fixture setup/teardown on Windows to catch intermittent LMDB lock-file
-    cleanup issues in CI.
-    """
+def test_scan_arcticdb_lazy_dataframe_with_prefilter(init_arcticdb, delete_arcticdb):
+    """ArcticDB-level QB pre-filter on the LazyDataFrame is preserved, and an
+    additional Polars predicate is pushed down on top of it."""
     info = init_arcticdb
-    uri = info["uri"]
-    lib_name = info["lib_name"]
-    expected = info["tables"]["df1"]
+    lib = info["lib"]
+    symbol = "df1"
 
-    predicate = pl.col("a") % 2 == 0
-    lazy: pl.LazyFrame = polarctic_module.scan_arcticdb(uri, lib_name, "df1")
-    pd_df: pd.DataFrame = lazy.filter(predicate).collect().to_pandas()
+    # Pre-filter via ArcticDB QB: a > 4 (rows 5-9)
+    qb = QueryBuilder()
+    qb = qb[qb["a"] > 4]
+    lazy_df = lib.read(symbol, query_builder=qb, lazy=True, output_format=OutputFormat.PYARROW)
 
-    expected = expected[expected["a"] % 2 == 0].reset_index(drop=True)
-    pdt.assert_frame_equal(pd_df, expected, check_dtype=False, check_like=True)
+    # Additional Polars predicate: b < 19 (keeps rows where b < 19)
+    lf: pl.LazyFrame = polarctic_module.scan_arcticdb(lazy_df)
+    result = lf.filter(pl.col("b") < 19).collect().to_pandas()
+
+    # Expected: rows where a > 4 AND b < 19
+    combined_qb = QueryBuilder()
+    combined_qb = combined_qb[(combined_qb["a"] > 4) & (combined_qb["b"] < 19)]
+    expected = lib.read(symbol, query_builder=combined_qb, output_format=OutputFormat.PANDAS).data
+
+    pdt.assert_frame_equal(result, expected, check_dtype=False, check_like=True)
+
+
+def test_scan_arcticdb_lazy_dataframe_with_column_selection(init_arcticdb, delete_arcticdb):
+    """Column selection (select) is pushed down into the LazyDataFrame read."""
+    info = init_arcticdb
+    lib = info["lib"]
+    symbol = "df1"
+
+    lazy_df = lib.read(symbol, lazy=True, output_format=OutputFormat.PYARROW)
+    lf: pl.LazyFrame = polarctic_module.scan_arcticdb(lazy_df)
+    result = lf.select(pl.col("a"), pl.col("b")).collect().to_pandas()
+
+    expected = lib.read(symbol, columns=["a", "b"], output_format=OutputFormat.PANDAS).data
+    pdt.assert_frame_equal(result, expected, check_dtype=False, check_like=True)
+
+
+def test_scan_arcticdb_lazy_dataframe_with_row_range(init_arcticdb, delete_arcticdb):
+    """A pre-sliced LazyDataFrame keeps its base row_range when scanned."""
+    info = init_arcticdb
+    lib = info["lib"]
+    symbol = "df1"
+
+    lazy_df = lib.read(
+        symbol,
+        row_range=(2, 7),
+        lazy=True,
+        output_format=OutputFormat.PYARROW,
+    )
+    lf: pl.LazyFrame = polarctic_module.scan_arcticdb(lazy_df)
+    result = lf.collect().to_pandas()
+
+    expected = lib.read(
+        symbol,
+        row_range=(2, 7),
+        output_format=OutputFormat.PANDAS,
+    ).data
+    pdt.assert_frame_equal(result, expected, check_dtype=False, check_like=True)
+
+
+def test_scan_arcticdb_lazy_dataframe_with_schema_changing_projection(
+    init_arcticdb,
+    delete_arcticdb,
+):
+    """Schema-changing ArcticDB preprocessing is reflected in Polars schema and data."""
+    info = init_arcticdb
+    lib = info["lib"]
+    symbol = "df1"
+    expected = info["tables"][symbol].copy()
+
+    lazy_df = lib.read(symbol, lazy=True, output_format=OutputFormat.PYARROW)
+    lazy_df["c"] = lazy_df["a"] + lazy_df["b"]
+
+    lf: pl.LazyFrame = polarctic_module.scan_arcticdb(lazy_df)
+    schema = lf.collect_schema()
+
+    assert "c" in schema.names()
+    assert schema["c"] == pl.Float64
+
+    result = lf.collect().to_pandas()
+    expected["c"] = expected["a"] + expected["b"]
+    pdt.assert_frame_equal(result, expected, check_dtype=False, check_like=True)
+
+

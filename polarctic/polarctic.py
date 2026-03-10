@@ -5,20 +5,23 @@ Use of this software is governed by the Business Source License 1.1 included in 
 
 As of the Change Date specified in that file, in accordance with the Business Source License, use of this software will be governed by the Apache License, version 2.0.
 """
+
 import ast
 import datetime as dt
 import re
-from collections.abc import Iterator
-from typing import Any, cast
+from collections.abc import Callable, Iterator
+from typing import Any, cast, overload
 
 import numpy as np
 import polars as pl
 import pyarrow as pa
-from arcticdb import Arctic, OutputFormat, QueryBuilder
-from arcticdb.version_store.library import Library
+from arcticdb import Arctic, LazyDataFrame, OutputFormat, QueryBuilder
+from arcticdb.version_store.library import Library, ReadRequest
 from arcticdb.version_store.processing import ExpressionNode
 from arcticdb_ext.util import RegexGeneric
 from arcticdb_ext.version_store import OperationType
+
+default_batch_size: int = 1000
 
 
 class PolarsToArcticDBTranslator:
@@ -44,7 +47,7 @@ class PolarsToArcticDBTranslator:
 
         # Clean the expression - remove surrounding brackets if present
         expr = str(polars_expr).strip()
-        if expr.startswith('[') and expr.endswith(']'):
+        if expr.startswith("[") and expr.endswith("]"):
             expr = expr[1:-1].strip()
 
         expr = self._replace_square_brackets(expr)
@@ -52,9 +55,9 @@ class PolarsToArcticDBTranslator:
         # Preprocess to handle Polars-specific notation like [dyn int: 2]
         expr = self._preprocess_expression(expr)
 
-         # Parse the expression
+        # Parse the expression
         try:
-            tree = ast.parse(expr, mode='eval')
+            tree = ast.parse(expr, mode="eval")
             expr_node = self._process_node(tree.body)
         except SyntaxError as e:
             raise ValueError(f"Invalid Polars expression: {polars_expr}") from e
@@ -63,14 +66,14 @@ class PolarsToArcticDBTranslator:
 
     def _replace_square_brackets(self, text: str) -> str:
         while True:
-            close = text.rfind('])')
+            close = text.rfind("])")
             if close == -1:
                 break
-            open_ = text.rfind('([', 0, close)
+            open_ = text.rfind("([", 0, close)
             if open_ == -1:
                 break
             # Replace the matched ([...]) with (...)
-            text = text[:open_] + '(' + text[open_ + 2:close] + ')' + text[close + 2:]
+            text = text[:open_] + "(" + text[open_ + 2 : close] + ")" + text[close + 2 :]
         return text
 
     def _preprocess_expression(self, expr: str) -> str:
@@ -80,13 +83,13 @@ class PolarsToArcticDBTranslator:
         Converts patterns like [dyn int: 2] to just the value (2).
         """
         # Pattern to match [dyn type: value] or [lit type: value]
-        pattern = r'[\[\(](dyn|lit)\s+\w+:\s*([^\]\)]+)[\]\)]'
+        pattern = r"[\[\(](dyn|lit)\s+\w+:\s*([^\]\)]+)[\]\)]"
 
         def replace_dynamic(match: re.Match) -> Any:
             return f"({match.group(2).strip()})"
 
         update = re.sub(pattern, replace_dynamic, expr)
-        update = re.sub(r'\.not\(\)', r'.not_()', update)
+        update = re.sub(r"\.not\(\)", r".not_()", update)
         return update
 
     def _process_node(self, node: ast.AST) -> Any:
@@ -108,9 +111,9 @@ class PolarsToArcticDBTranslator:
                 return self._process_binop(cast(ast.BinOp, node))
             case ast.UnaryOp:
                 return self._process_unaryop(cast(ast.UnaryOp, node))
-            #case ast.List:
+            # case ast.List:
             #    return [self._process_node(elt) for elt in node.elts]
-            #case ast.Tuple:
+            # case ast.Tuple:
             #    return tuple(self._process_node(elt) for elt in node.elts)
             case _:
                 raise NotImplementedError(f"Node type {node_type.__name__} not supported")
@@ -124,24 +127,28 @@ class PolarsToArcticDBTranslator:
                 func = cast(ast.Attribute, node.func)
                 attr = func.attr
                 match attr:
-                    case 'negate':
+                    case "negate":
                         new_node = ast.UnaryOp(ast.USub(), func.value)
                         return self._process_unaryop(new_node)
-                    case 'not_':
+                    case "not_":
                         new_node = ast.UnaryOp(ast.Invert(), func.value)
                         return self._process_unaryop(new_node)
-                    case 'abs':
-                        return ExpressionNode.compose(self._process_node(func.value), OperationType.ABS, None)
-                    case 'is_null':
-                        return ExpressionNode.compose(self._process_node(func.value), OperationType.ISNULL, None)
-                    case 'contains':
+                    case "abs":
+                        operand = self._process_node(func.value)
+                        return ExpressionNode.compose(operand, OperationType.ABS, None)
+                    case "is_null":
+                        operand = self._process_node(func.value)
+                        return ExpressionNode.compose(operand, OperationType.ISNULL, None)
+                    case "contains":
                         arg = self._process_node(node.args[0])
                         left = self._process_node(func.value)
-                        if left[1] == 'str':
-                            return ExpressionNode.compose(left[0], OperationType.REGEX_MATCH, RegexGeneric(arg))
+                        if left[1] == "str":
+                            return ExpressionNode.compose(
+                                left[0], OperationType.REGEX_MATCH, RegexGeneric(arg)
+                            )
                         else:
                             raise NotImplementedError(f"Method {attr} not supported")
-                    case 'is_in':
+                    case "is_in":
                         arg_list = [self._process_node(arg) for arg in node.args]
                         left = self._process_node(func.value)
                         return ExpressionNode.compose(left, OperationType.ISIN, np.array(arg_list))
@@ -152,18 +159,18 @@ class PolarsToArcticDBTranslator:
                 func_name = cast(ast.Name, node.func).id
                 args = [self._process_node(arg) for arg in node.args]
 
-                if func_name == 'col':
+                if func_name == "col":
                     return ExpressionNode.column_ref(args[0]) if args else None
             case _:
                 return None
 
     def _process_attribute(self, node: ast.Attribute) -> Any:
         """Process attribute access like pl.col or obj.attr."""
-        #TODO rework this
+        # TODO rework this
         obj = self._process_node(node.value)
         attr = node.attr
 
-        if attr in ['str']:
+        if attr in ["str"]:
             return (obj, attr)
 
         raise NotImplementedError(f"Attribute {attr} not supported for object {obj}")
@@ -173,9 +180,8 @@ class PolarsToArcticDBTranslator:
 
         left = self._process_node(node.left)
 
-        expr_node = None
-
         # Handle multiple comparisons
+        expr_node: Any = None
         for op, comparator in zip(node.ops, node.comparators):
             right = self._process_node(comparator)
             op_type = type(op)
@@ -199,8 +205,9 @@ class PolarsToArcticDBTranslator:
                     expr_node = ExpressionNode.compose(left, OperationType.ISNOTIN, right)
                 case _:
                     raise NotImplementedError(f"Operator {op_type} not supported")
-            left = expr_node
+            left = expr_node  # type: ignore[assignment]
 
+        assert expr_node is not None
         return expr_node
 
     def _process_binop(self, node: ast.BinOp) -> Any:
@@ -247,96 +254,198 @@ class PolarsToArcticDBTranslator:
 
         return None
 
+
 def parse_schema(
-    lib: Library,
-    symbol: str,
-    as_of: int | str | dt.datetime | None = None
+    lib: Library, symbol: str, as_of: int | str | dt.datetime | None = None
 ) -> pl.Schema:
-    result = lib.read(
-        symbol,
-        as_of=as_of,
-        output_format=OutputFormat.PYARROW,
-        row_range=(0, 1),
-    )
-    arrow_table = cast(pa.Table, result.data)
-    return pl.Schema(arrow_table.schema)
+    arrow_df = lib.read(
+        symbol, as_of=as_of, output_format=OutputFormat.PYARROW, row_range=((0, 1))
+    ).data  # type: ignore[union-attr]
+    return pl.Schema(arrow_df.schema)  # type: ignore[arg-type]
 
-def scan_arcticdb(
-    uri: str,
-    lib_name: str,
-    symbol: str,
-    as_of: int | str | dt.datetime | None = None
+
+def _translate_predicate(
+    predicate: pl.Expr | None,
+    query_builder: QueryBuilder | None = None,
+) -> QueryBuilder | None:
+    if predicate is None:
+        return query_builder
+
+    translator = PolarsToArcticDBTranslator()
+    base_query_builder = query_builder or QueryBuilder()
+    try:
+        return cast(QueryBuilder, translator.translate(predicate, base_query_builder))
+    except (NotImplementedError, ValueError):
+        # Unsupported predicate for ArcticDB pushdown; fall back to Polars-side filtering
+        return query_builder
+
+
+def _iter_read_request_batches(
+    lib: Library,
+    read_request: ReadRequest,
+    n_rows: int | None,
+    batch_size: int | None,
+) -> Iterator[pl.DataFrame]:
+    effective_batch_size = batch_size or default_batch_size
+    read_offset = 0
+    remaining_rows = n_rows
+
+    while remaining_rows is None or remaining_rows > 0:
+        current_batch_size = (
+            effective_batch_size
+            if remaining_rows is None
+            else min(effective_batch_size, remaining_rows)
+        )
+
+        lazy_batch = cast(
+            LazyDataFrame,
+            lib.read(**read_request._asdict(), lazy=True),
+        )
+        lazy_batch = cast(
+            LazyDataFrame,
+            lazy_batch.row_range((read_offset, read_offset + current_batch_size)),
+        )
+        arrow_table = cast(pa.Table, lazy_batch.collect().data)
+        rows_read = arrow_table.num_rows
+
+        if rows_read == 0:
+            break
+
+        yield cast(pl.DataFrame, pl.from_arrow(arrow_table))
+
+        read_offset += rows_read
+        if remaining_rows is not None:
+            remaining_rows -= rows_read
+        if rows_read < current_batch_size:
+            break
+
+
+def _register_arctic_source(
+    lib: Library,
+    schema_getter: Callable[[], pl.Schema],
+    read_request_getter: Callable[[], ReadRequest],
 ) -> pl.LazyFrame:
-
-    ac = Arctic(uri)
-    lib = ac.get_library(lib_name)
-
-    def schema() -> pl.Schema:
-        return parse_schema(lib, symbol, as_of)
-
     def source_generator(
         with_columns: list[str] | None,
         predicate: pl.Expr | None,
         n_rows: int | None,
-        batch_size: int | None
+        batch_size: int | None,
     ) -> Iterator[pl.DataFrame]:
+        read_request = read_request_getter()
 
-        qb = None
-        apply_polars_filter = False
-        if predicate is not None:
-            tl = PolarsToArcticDBTranslator()
-            try:
-                qb = QueryBuilder()
-                qb = tl.translate(predicate, qb)
-            except (NotImplementedError, ValueError):
-                # Predicate (or part of it) cannot be pushed down to ArcticDB.
-                # Fetch all rows and apply the full predicate in Polars instead.
-                qb = None
-                apply_polars_filter = True
+        if with_columns is not None:
+            read_request = read_request._replace(columns=with_columns)
 
-        lazy_df = cast(
-            Any,
-            lib.read(
-                symbol,
-                as_of=as_of,
-                columns=with_columns,
-                query_builder=qb,
-                lazy=True,
-                output_format=OutputFormat.PYARROW,
-            ),
+        read_request = read_request._replace(
+            output_format=OutputFormat.PYARROW,
+            query_builder=_translate_predicate(predicate, read_request.query_builder),
         )
 
-        if batch_size is None:
-            batch_size = 1000
+        yield from _iter_read_request_batches(lib, read_request, n_rows, batch_size)
 
-        if n_rows is not None:
-            batch_size = min(batch_size, n_rows)
+    return pl.io.plugins.register_io_source(  # type: ignore[attr-defined]
+        io_source=source_generator,
+        schema=schema_getter,
+    )
 
-        read_idx = 0
-        while n_rows is None or n_rows > 0:
-            if n_rows is not None:
-                current_batch_size = min(batch_size, n_rows)
-            else:
-                current_batch_size = batch_size
 
-            lazy_df_slice = lazy_df.row_range((read_idx, read_idx + current_batch_size))
-            read_idx += current_batch_size
-            arrow_df = lazy_df_slice.collect().data
-            exhausted = arrow_df.num_rows < current_batch_size
+def _scan_lazy_dataframe(source: LazyDataFrame) -> pl.LazyFrame:
+    """Register a Polars IO source backed by an existing ArcticDB LazyDataFrame.
 
-            df = cast(pl.DataFrame, pl.from_arrow(arrow_df))
+    The LazyDataFrame may already carry ArcticDB-level QueryBuilder operations
+    (projections, filters). Any additional Polars predicates or
+    column selections are pushed down on top of those.
+    """
 
-            if apply_polars_filter and predicate is not None:
-                df = df.filter(predicate)
+    return _register_arctic_source(
+        lib=cast(Library, source.lib),
+        schema_getter=lambda: cast(pl.Schema, source._collect_schema()),  # type: ignore[attr-defined]
+        read_request_getter=lambda: cast(ReadRequest, source._to_read_request()),  # type: ignore[attr-defined]
+    )
 
-            if n_rows is not None:
-                n_rows -= len(df)
-            elif exhausted:
-                n_rows = 0
 
-            yield df
+@overload
+def scan_arcticdb(
+    source: str,
+    lib_name: str,
+    symbol: str,
+    /,
+    *,
+    as_of: int | str | dt.datetime | None = None,
+) -> pl.LazyFrame: ...
 
-            if exhausted:
-                break
 
-    return pl.io.plugins.register_io_source(io_source=source_generator, schema = schema)
+@overload
+def scan_arcticdb(
+    source: Library,
+    symbol: str,
+    /,
+    *,
+    as_of: int | str | dt.datetime | None = None,
+) -> pl.LazyFrame: ...
+
+
+@overload
+def scan_arcticdb(
+    source: LazyDataFrame,
+    /,
+) -> pl.LazyFrame: ...
+
+
+def scan_arcticdb(
+    source: str | Library | LazyDataFrame,
+    lib_name_or_symbol: str | None = None,
+    symbol: str | None = None,
+    /,
+    *,
+    as_of: int | str | dt.datetime | None = None,
+) -> pl.LazyFrame:
+    """
+    Create a Polars LazyFrame backed by an ArcticDB symbol.
+
+    Three calling forms are supported:
+
+    1. URI form (highest overhead — opens an Arctic connection on each call)::
+           scan_arcticdb(uri, lib_name, symbol, *, as_of=None)
+
+    2. Library form (preferred for repeated calls against the same library)::
+           scan_arcticdb(lib, symbol, *, as_of=None)
+
+    3. LazyDataFrame form (pre-apply ArcticDB operations before Polars sees the data)::
+           scan_arcticdb(lazy_df)
+    """
+    if isinstance(source, str):
+        if lib_name_or_symbol is None or symbol is None:
+            raise ValueError("lib_name and symbol are required when source is a URI string")
+        lib: Library = Arctic(source).get_library(lib_name_or_symbol)
+    elif isinstance(source, Library):
+        lib = source
+        if lib_name_or_symbol is None:
+            raise ValueError("symbol is required when source is a Library")
+        symbol = lib_name_or_symbol
+    elif isinstance(source, LazyDataFrame):
+        return _scan_lazy_dataframe(source)
+    else:
+        raise TypeError(f"Unsupported source type: {type(source).__name__}")
+
+    def schema() -> pl.Schema:
+        return parse_schema(lib, symbol, as_of)
+
+    base_lazy_source = cast(
+        LazyDataFrame,
+        lib.read(
+            symbol,
+            as_of=as_of,
+            lazy=True,
+            output_format=OutputFormat.PYARROW,
+        ),
+    )
+
+    return _register_arctic_source(
+        lib=lib,
+        schema_getter=schema,
+        read_request_getter=lambda: cast(
+            ReadRequest,
+            base_lazy_source._to_read_request(),  # type: ignore[attr-defined]
+        ),
+    )
