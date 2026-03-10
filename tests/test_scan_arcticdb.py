@@ -19,12 +19,10 @@ Dependencies (imported at module import time, not lazily):
 Each test takes both fixtures init_arcticdb and delete_arcticdb so setup runs
 before the test and teardown removes the LMDB store afterwards.
 """
-from unittest.mock import patch
 
 import pandas as pd
 import pandas.testing as pdt
 import polars as pl
-import pytest
 from arcticdb import OutputFormat, QueryBuilder, VersionedItem
 
 import polarctic.polarctic as polarctic_module
