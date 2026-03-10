@@ -3,7 +3,8 @@ Copyright 2026 Man Group Operations Limited
 
 Use of this software is governed by the Business Source License 1.1 included in the file LICENSE
 
-As of the Change Date specified in that file, in accordance with the Business Source License, use of this software will be governed by the Apache License, version 2.0.
+As of the Change Date specified in that file, in accordance with the Business Source License, use of
+this software will be governed by the Apache License, version 2.0.
 """
 
 import ast
@@ -89,8 +90,7 @@ class PolarsToArcticDBTranslator:
             return f"({match.group(2).strip()})"
 
         update = re.sub(pattern, replace_dynamic, expr)
-        update = re.sub(r"\.not\(\)", r".not_()", update)
-        return update
+        return re.sub(r"\.not\(\)", r".not_()", update)
 
     def _process_node(self, node: ast.AST) -> Any:
         """Process an AST node and apply corresponding ArcticDB operation."""
@@ -146,8 +146,7 @@ class PolarsToArcticDBTranslator:
                             return ExpressionNode.compose(
                                 left[0], OperationType.REGEX_MATCH, RegexGeneric(arg)
                             )
-                        else:
-                            raise NotImplementedError(f"Method {attr} not supported")
+                        raise NotImplementedError(f"Method {attr} not supported")
                     case "is_in":
                         arg_list = [self._process_node(arg) for arg in node.args]
                         left = self._process_node(func.value)
@@ -163,6 +162,7 @@ class PolarsToArcticDBTranslator:
                     return ExpressionNode.column_ref(args[0]) if args else None
             case _:
                 return None
+        return None
 
     def _process_attribute(self, node: ast.Attribute) -> Any:
         """Process attribute access like pl.col or obj.attr."""
@@ -182,7 +182,7 @@ class PolarsToArcticDBTranslator:
 
         # Handle multiple comparisons
         expr_node: Any = None
-        for op, comparator in zip(node.ops, node.comparators):
+        for op, comparator in zip(node.ops, node.comparators, strict=False):
             right = self._process_node(comparator)
             op_type = type(op)
 

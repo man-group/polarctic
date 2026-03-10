@@ -1,10 +1,10 @@
-
 """
 Copyright 2026 Man Group Operations Limited
 
 Use of this software is governed by the Business Source License 1.1 included in the file LICENSE
 
-As of the Change Date specified in that file, in accordance with the Business Source License, use of this software will be governed by the Apache License, version 2.0.
+As of the Change Date specified in that file, in accordance with the Business Source License, use of
+this software will be governed by the Apache License, version 2.0.
 """
 
 """
@@ -19,7 +19,6 @@ Dependencies (imported at module import time, not lazily):
 Each test takes both fixtures init_arcticdb and delete_arcticdb so setup runs
 before the test and teardown removes the LMDB store afterwards.
 """
-import sys
 from unittest.mock import patch
 
 import pandas as pd
@@ -59,6 +58,7 @@ def test_scan_arcticdb_reads_data(init_arcticdb, delete_arcticdb):
         pd_df: pd.DataFrame = pl_df.to_pandas()
         pdt.assert_frame_equal(pd_df, expected_df, check_dtype=False, check_like=True)
 
+
 def test_scan_articdb_with_filter(init_arcticdb, delete_arcticdb):
     info = init_arcticdb
     uri = info["uri"]
@@ -80,8 +80,11 @@ def test_scan_articdb_with_filter(init_arcticdb, delete_arcticdb):
             lazy: pl.LazyFrame = polarctic_module.scan_arcticdb(uri, lib_name, symbol)
             pl_df: pl.DataFrame = lazy.filter(filter).collect()
             pd_df: pd.DataFrame = pl_df.to_pandas()
-            arctic_df: VersionedItem = lib.read(symbol, query_builder = query_builder, output_format = OutputFormat.PANDAS)
+            arctic_df: VersionedItem = lib.read(
+                symbol, query_builder=query_builder, output_format=OutputFormat.PANDAS
+            )
             pdt.assert_frame_equal(pd_df, arctic_df.data, check_dtype=False, check_like=True)
+
 
 def test_scan_arcticdb_with_select(init_arcticdb, delete_arcticdb):
     info = init_arcticdb
@@ -218,5 +221,3 @@ def test_scan_arcticdb_lazy_dataframe_with_schema_changing_projection(
     result = lf.collect().to_pandas()
     expected["c"] = expected["a"] + expected["b"]
     pdt.assert_frame_equal(result, expected, check_dtype=False, check_like=True)
-
-
