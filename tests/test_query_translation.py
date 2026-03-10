@@ -1,12 +1,3 @@
-"""
-Copyright 2026 Man Group Operations Limited
-
-Use of this software is governed by the Business Source License 1.1 included in the file LICENSE
-
-As of the Change Date specified in that file, in accordance with the Business Source
-License, use of this software will be governed by the Apache License, version 2.0.
-"""
-
 from typing import Any
 
 import polars as pl
@@ -15,6 +6,14 @@ from arcticdb import QueryBuilder
 
 from polarctic.polarctic import PolarsToArcticDBTranslator
 
+"""
+Copyright 2026 Man Group Operations Limited
+
+Use of this software is governed by the Business Source License 1.1 included in the file LICENSE
+
+As of the Change Date specified in that file, in accordance with the Business Source
+License, use of this software will be governed by the Apache License, version 2.0.
+"""
 
 def make_query_builder() -> Any:
     return QueryBuilder()

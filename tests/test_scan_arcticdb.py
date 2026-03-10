@@ -1,3 +1,10 @@
+import pandas as pd
+import pandas.testing as pdt
+import polars as pl
+from arcticdb import OutputFormat, QueryBuilder, VersionedItem
+
+import polarctic.polarctic as polarctic_module
+
 """
 Copyright 2026 Man Group Operations Limited
 
@@ -19,13 +26,6 @@ Dependencies (imported at module import time, not lazily):
 Each test takes both fixtures init_arcticdb and delete_arcticdb so setup runs
 before the test and teardown removes the LMDB store afterwards.
 """
-
-import pandas as pd
-import pandas.testing as pdt
-import polars as pl
-from arcticdb import OutputFormat, QueryBuilder, VersionedItem
-
-import polarctic.polarctic as polarctic_module
 
 
 def test_parse_schema_returns_expected_schema(init_arcticdb, delete_arcticdb):
@@ -73,7 +73,7 @@ def test_scan_articdb_with_filter(init_arcticdb, delete_arcticdb):
     qe3 = qe3[(qe3["a"] > 4) & (qe3["b"] < 19)]
     query_builders = [qe1, qe2, qe3]
 
-    for filter, query_builder in zip(filters, query_builders):
+    for filter, query_builder in zip(filters, query_builders, strict=False):
         for symbol in expected_tables:
             lazy: pl.LazyFrame = polarctic_module.scan_arcticdb(uri, lib_name, symbol)
             pl_df: pl.DataFrame = lazy.filter(filter).collect()
@@ -87,7 +87,6 @@ def test_scan_articdb_with_filter(init_arcticdb, delete_arcticdb):
 def test_scan_arcticdb_with_select(init_arcticdb, delete_arcticdb):
     info = init_arcticdb
     uri = info["uri"]
-    lib = info["lib"]
     lib_name = info["lib_name"]
     expected_tables: dict = info["tables"]
 
@@ -106,7 +105,7 @@ def test_scan_arcticdb_library_source(init_arcticdb, delete_arcticdb):
     lib_name = info["lib_name"]
     expected_tables: dict = info["tables"]
 
-    for symbol, expected_df in expected_tables.items():
+    for symbol, _expected_df in expected_tables.items():
         lazy_lib: pl.LazyFrame = polarctic_module.scan_arcticdb(lib, symbol)
         lazy_uri: pl.LazyFrame = polarctic_module.scan_arcticdb(uri, lib_name, symbol)
         pdt.assert_frame_equal(
