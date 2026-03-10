@@ -161,6 +161,7 @@ def test_bitwise_xor_integer(translator: PolarsToArcticDBTranslator) -> None:
     qe = qe[(qe["col1"] ^ 1) == 3]
     assert q == qe
 
+
 def test_not(translator):
     q = QueryBuilder()
     q = translator.translate(~pl.col("col1"), q)
