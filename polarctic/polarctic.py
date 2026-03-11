@@ -307,7 +307,10 @@ def _iter_read_request_batches(
             base_start = 0
             if rr.row_range is not None and rr.row_range[0] is not None:
                 base_start = rr.row_range[0]
-            rr = rr._replace(row_range=(base_start, base_start + n_rows))
+            end = base_start + n_rows
+            if rr.row_range is not None and rr.row_range[1] is not None:
+                end = min(end, rr.row_range[1])
+            rr = rr._replace(row_range=(base_start, end))
         arrow_table = cast(pa.Table, lib.read(**rr._asdict()).data)
         if arrow_table.num_rows > 0:
             yield cast(pl.DataFrame, pl.from_arrow(arrow_table, rechunk=False))

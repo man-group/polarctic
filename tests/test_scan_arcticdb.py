@@ -66,7 +66,7 @@ def test_scan_arcticdb_reads_data(
         pdt.assert_frame_equal(pd_df, expected_df, check_dtype=False, check_like=True)
 
 
-def test_scan_articdb_with_filter(
+def test_scan_arcticdb_with_filter(
     init_arcticdb: dict[str, Any],
     delete_arcticdb: Any,
 ) -> None:
