@@ -312,11 +312,13 @@ def bench_baseline_filter_simple_medium(
     lib = arcticdb_store["lib"]
     symbol = arcticdb_store["medium_symbol"]
     benchmark(
-        lambda: lib.read(
-            symbol,
-            query_builder=prepared_query_builders["simple"],
-            output_format=OutputFormat.PANDAS,
-        ).data
+        lambda: (
+            lib.read(
+                symbol,
+                query_builder=prepared_query_builders["simple"],
+                output_format=OutputFormat.PANDAS,
+            ).data
+        )
     )
 
 
@@ -329,11 +331,13 @@ def bench_baseline_filter_simple_large(
     lib = arcticdb_store["lib"]
     symbol = arcticdb_store["large_symbol"]
     benchmark(
-        lambda: lib.read(
-            symbol,
-            query_builder=prepared_query_builders["simple"],
-            output_format=OutputFormat.PANDAS,
-        ).data
+        lambda: (
+            lib.read(
+                symbol,
+                query_builder=prepared_query_builders["simple"],
+                output_format=OutputFormat.PANDAS,
+            ).data
+        )
     )
 
 
@@ -346,11 +350,13 @@ def bench_baseline_filter_compound_medium(
     lib = arcticdb_store["lib"]
     symbol = arcticdb_store["medium_symbol"]
     benchmark(
-        lambda: lib.read(
-            symbol,
-            query_builder=prepared_query_builders["compound"],
-            output_format=OutputFormat.PANDAS,
-        ).data
+        lambda: (
+            lib.read(
+                symbol,
+                query_builder=prepared_query_builders["compound"],
+                output_format=OutputFormat.PANDAS,
+            ).data
+        )
     )
 
 
@@ -363,11 +369,13 @@ def bench_baseline_filter_compound_large(
     lib = arcticdb_store["lib"]
     symbol = arcticdb_store["large_symbol"]
     benchmark(
-        lambda: lib.read(
-            symbol,
-            query_builder=prepared_query_builders["compound"],
-            output_format=OutputFormat.PANDAS,
-        ).data
+        lambda: (
+            lib.read(
+                symbol,
+                query_builder=prepared_query_builders["compound"],
+                output_format=OutputFormat.PANDAS,
+            ).data
+        )
     )
 
 
@@ -379,11 +387,13 @@ def bench_baseline_select_two_columns_medium(
     lib = arcticdb_store["lib"]
     symbol = arcticdb_store["medium_symbol"]
     benchmark(
-        lambda: lib.read(
-            symbol,
-            columns=list(_TWO_COLUMN_PROJECTION),
-            output_format=OutputFormat.PANDAS,
-        ).data
+        lambda: (
+            lib.read(
+                symbol,
+                columns=list(_TWO_COLUMN_PROJECTION),
+                output_format=OutputFormat.PANDAS,
+            ).data
+        )
     )
 
 
@@ -395,9 +405,11 @@ def bench_baseline_select_two_columns_large(
     lib = arcticdb_store["lib"]
     symbol = arcticdb_store["large_symbol"]
     benchmark(
-        lambda: lib.read(
-            symbol,
-            columns=list(_TWO_COLUMN_PROJECTION),
-            output_format=OutputFormat.PANDAS,
-        ).data
+        lambda: (
+            lib.read(
+                symbol,
+                columns=list(_TWO_COLUMN_PROJECTION),
+                output_format=OutputFormat.PANDAS,
+            ).data
+        )
     )

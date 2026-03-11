@@ -171,56 +171,68 @@ def _build_cases(lib: Library) -> list[BenchmarkCase]:
         BenchmarkCase(
             "Filter simple (a > 500) - medium",
             lazy_filter_simple_medium.collect,
-            lambda: lib.read(
-                "medium",
-                query_builder=qb_simple,
-                output_format=OutputFormat.PANDAS,
-            ).data,
+            lambda: (
+                lib.read(
+                    "medium",
+                    query_builder=qb_simple,
+                    output_format=OutputFormat.PANDAS,
+                ).data
+            ),
         ),
         BenchmarkCase(
             "Filter simple (a > 500) - large",
             lazy_filter_simple_large.collect,
-            lambda: lib.read(
-                "large",
-                query_builder=qb_simple,
-                output_format=OutputFormat.PANDAS,
-            ).data,
+            lambda: (
+                lib.read(
+                    "large",
+                    query_builder=qb_simple,
+                    output_format=OutputFormat.PANDAS,
+                ).data
+            ),
         ),
         BenchmarkCase(
             "Filter compound (a>200 & b<700) - medium",
             lazy_filter_compound_medium.collect,
-            lambda: lib.read(
-                "medium",
-                query_builder=qb_compound,
-                output_format=OutputFormat.PANDAS,
-            ).data,
+            lambda: (
+                lib.read(
+                    "medium",
+                    query_builder=qb_compound,
+                    output_format=OutputFormat.PANDAS,
+                ).data
+            ),
         ),
         BenchmarkCase(
             "Filter compound (a>200 & b<700) - large",
             lazy_filter_compound_large.collect,
-            lambda: lib.read(
-                "large",
-                query_builder=qb_compound,
-                output_format=OutputFormat.PANDAS,
-            ).data,
+            lambda: (
+                lib.read(
+                    "large",
+                    query_builder=qb_compound,
+                    output_format=OutputFormat.PANDAS,
+                ).data
+            ),
         ),
         BenchmarkCase(
             "Select 2 columns - medium",
             lazy_select_two_columns_medium.collect,
-            lambda: lib.read(
-                "medium",
-                columns=_TWO_COLUMN_PROJECTION,
-                output_format=OutputFormat.PANDAS,
-            ).data,
+            lambda: (
+                lib.read(
+                    "medium",
+                    columns=_TWO_COLUMN_PROJECTION,
+                    output_format=OutputFormat.PANDAS,
+                ).data
+            ),
         ),
         BenchmarkCase(
             "Select 2 columns - large",
             lazy_select_two_columns_large.collect,
-            lambda: lib.read(
-                "large",
-                columns=_TWO_COLUMN_PROJECTION,
-                output_format=OutputFormat.PANDAS,
-            ).data,
+            lambda: (
+                lib.read(
+                    "large",
+                    columns=_TWO_COLUMN_PROJECTION,
+                    output_format=OutputFormat.PANDAS,
+                ).data
+            ),
         ),
     ]
 
@@ -300,9 +312,7 @@ def _print_results(results: list[tuple[str, pyperf.Benchmark, pyperf.Benchmark]]
             f"(coefficient of variation >= {_NOISE_WARNING_THRESHOLD:.0f}%):"
         )
         for label, polar_noise, baseline_noise in noisy_cases:
-            print(
-                f"  {label}: polarctic={polar_noise:.1f}%  arcticdb={baseline_noise:.1f}%"
-            )
+            print(f"  {label}: polarctic={polar_noise:.1f}%  arcticdb={baseline_noise:.1f}%")
         print(
             "  rerun with --rigorous or pin the benchmark to a CPU with --affinity"
             " if these scenarios matter"
