@@ -315,7 +315,7 @@ def test_process_attribute_compare_and_unary_error_branches(
         is not None
     )
 
-    with pytest.raises(NotImplementedError, match="Operator <class 'ast.Is'> not supported"): # noqa: RUF043
+    with pytest.raises(NotImplementedError, match="Operator <class 'ast.Is'> not supported"):  # noqa: RUF043
         translator._process_compare(
             ast.Compare(
                 left=ast.Constant(1),
@@ -339,4 +339,6 @@ def test_translate_predicate_falls_back_on_unsupported_predicate(
     base_query_builder = QueryBuilder()
     monkeypatch.setattr(polarctic_module._TRANSLATOR, "translate", raise_not_implemented)
 
-    assert polarctic_module._translate_predicate(pl.col("a"), base_query_builder) is base_query_builder
+    assert (
+        polarctic_module._translate_predicate(pl.col("a"), base_query_builder) is base_query_builder
+    )
