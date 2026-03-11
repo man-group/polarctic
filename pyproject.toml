@@ -32,6 +32,7 @@ dev = [
     "pytest>=7.0.0",
     "pytest-benchmark>=4.0.0",
     "pytest-cov>=4.0.0",
+    "pyperf>=2.0.0",
     "ruff>=0.1.0",
     "mypy>=1.0.0",
 ]

@@ -11,24 +11,30 @@ speedup/overhead ratio table.
 
 Benchmarking policy:
 - One-time setup (LMDB init, LazyFrame construction, QB construction) is excluded.
-- Timed sections only run collect() or lib.read() for apples-to-apples timing.
+- Each scenario is validated once before timing to ensure both implementations
+    return the same result.
+- Timed sections use pyperf worker processes and disable GC during each sample
+    to reduce run-to-run noise.
 
 Usage:
-    uv run --extra dev python tests/bench_compare.py [--rounds N]
+        uv run --extra dev python tests/bench_compare.py
+        uv run --extra dev python tests/bench_compare.py --fast
+        uv run --extra dev python tests/bench_compare.py --rigorous -o benchmark-results.json
 """
 
-import argparse
 import gc
-import statistics
 import tempfile
-import timeit
+import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
 import pandas as pd
+import pandas.testing as pdt
 import polars as pl
+import pyperf
 from arcticdb import Arctic, OutputFormat, QueryBuilder
 from arcticdb.version_store.library import Library
 
@@ -37,6 +43,14 @@ import polarctic.polarctic as polarctic_module
 _SIMPLE_FILTER_EXPR = pl.col("a") > 500
 _COMPOUND_FILTER_EXPR = (pl.col("a") > 200) & (pl.col("b") < 700.0)
 _TWO_COLUMN_PROJECTION = ["a", "b"]
+_NOISE_WARNING_THRESHOLD = 10.0
+
+
+@dataclass(frozen=True)
+class BenchmarkCase:
+    label: str
+    polarctic_fn: Callable[[], object]
+    baseline_fn: Callable[[], object]
 
 
 # ---------------------------------------------------------------------------
@@ -44,10 +58,39 @@ _TWO_COLUMN_PROJECTION = ["a", "b"]
 # ---------------------------------------------------------------------------
 
 
-def _median_ms(fn: Callable[[], object], rounds: int) -> float:
-    """Return the median wall-clock time of `rounds` calls, in milliseconds."""
-    times = timeit.repeat(fn, number=1, repeat=rounds)
-    return statistics.median(times) * 1_000
+def _result_to_pandas(result: object) -> pd.DataFrame:
+    if isinstance(result, pl.DataFrame):
+        return result.to_pandas()
+    if isinstance(result, pd.DataFrame):
+        return result
+    raise TypeError(f"Unsupported benchmark result type: {type(result)!r}")
+
+
+def _verify_case(case: BenchmarkCase) -> None:
+    polarctic_df = _result_to_pandas(case.polarctic_fn())
+    baseline_df = _result_to_pandas(case.baseline_fn())
+    pdt.assert_frame_equal(
+        polarctic_df,
+        baseline_df,
+        check_dtype=False,
+        check_like=True,
+        obj=case.label,
+    )
+
+
+def _time_callable(loops: int, fn: Callable[[], object]) -> float:
+    gc.collect()
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        timer = time.perf_counter
+        start = timer()
+        for _ in range(loops):
+            fn()
+        return timer() - start
+    finally:
+        if gc_was_enabled:
+            gc.enable()
 
 
 def _qb_simple() -> QueryBuilder:
@@ -98,8 +141,8 @@ def _setup(tmp_dir: Path) -> dict[str, Library]:
 # ---------------------------------------------------------------------------
 
 
-def _build_pairs(lib: Library) -> list[tuple[str, Callable[[], object], Callable[[], object]]]:
-    """Return (label, polarctic_fn, baseline_fn) triples."""
+def _build_cases(lib: Library) -> list[BenchmarkCase]:
+    """Return the comparison scenarios for polarctic and raw ArcticDB."""
     qb_simple = _qb_simple()
     qb_compound = _qb_compound()
 
@@ -115,17 +158,17 @@ def _build_pairs(lib: Library) -> list[tuple[str, Callable[[], object], Callable
     lazy_select_two_columns_large = lazy_large.select(*_TWO_COLUMN_PROJECTION)
 
     return [
-        (
+        BenchmarkCase(
             "Full scan - medium (10k rows)",
             lazy_medium.collect,
             lambda: lib.read("medium", output_format=OutputFormat.PANDAS).data,
         ),
-        (
+        BenchmarkCase(
             "Full scan - large (100k rows)",
             lazy_large.collect,
             lambda: lib.read("large", output_format=OutputFormat.PANDAS).data,
         ),
-        (
+        BenchmarkCase(
             "Filter simple (a > 500) - medium",
             lazy_filter_simple_medium.collect,
             lambda: lib.read(
@@ -134,7 +177,7 @@ def _build_pairs(lib: Library) -> list[tuple[str, Callable[[], object], Callable
                 output_format=OutputFormat.PANDAS,
             ).data,
         ),
-        (
+        BenchmarkCase(
             "Filter simple (a > 500) - large",
             lazy_filter_simple_large.collect,
             lambda: lib.read(
@@ -143,7 +186,7 @@ def _build_pairs(lib: Library) -> list[tuple[str, Callable[[], object], Callable
                 output_format=OutputFormat.PANDAS,
             ).data,
         ),
-        (
+        BenchmarkCase(
             "Filter compound (a>200 & b<700) - medium",
             lazy_filter_compound_medium.collect,
             lambda: lib.read(
@@ -152,7 +195,7 @@ def _build_pairs(lib: Library) -> list[tuple[str, Callable[[], object], Callable
                 output_format=OutputFormat.PANDAS,
             ).data,
         ),
-        (
+        BenchmarkCase(
             "Filter compound (a>200 & b<700) - large",
             lazy_filter_compound_large.collect,
             lambda: lib.read(
@@ -161,7 +204,7 @@ def _build_pairs(lib: Library) -> list[tuple[str, Callable[[], object], Callable
                 output_format=OutputFormat.PANDAS,
             ).data,
         ),
-        (
+        BenchmarkCase(
             "Select 2 columns - medium",
             lazy_select_two_columns_medium.collect,
             lambda: lib.read(
@@ -170,7 +213,7 @@ def _build_pairs(lib: Library) -> list[tuple[str, Callable[[], object], Callable
                 output_format=OutputFormat.PANDAS,
             ).data,
         ),
-        (
+        BenchmarkCase(
             "Select 2 columns - large",
             lazy_select_two_columns_large.collect,
             lambda: lib.read(
@@ -190,6 +233,21 @@ _COL_LABEL = 42
 _COL_NUM = 10
 
 
+def _benchmark_name(label: str, implementation: str) -> str:
+    return f"{label} [{implementation}]"
+
+
+def _median_ms(benchmark: pyperf.Benchmark) -> float:
+    return float(benchmark.median()) * 1_000
+
+
+def _coefficient_of_variation(benchmark: pyperf.Benchmark) -> float:
+    mean = float(benchmark.mean())
+    if mean == 0:
+        return 0.0
+    return float(benchmark.stdev()) / mean * 100
+
+
 def _row(label: str, polar_ms: float, base_ms: float) -> str:
     ratio = base_ms / polar_ms
     overhead_ms = polar_ms - base_ms
@@ -203,56 +261,102 @@ def _row(label: str, polar_ms: float, base_ms: float) -> str:
     )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--rounds", type=int, default=20, help="Timing rounds per benchmark")
-    args = parser.parse_args()
+def _print_results(results: list[tuple[str, pyperf.Benchmark, pyperf.Benchmark]]) -> None:
+    header_label = "Scenario"
+    header = (
+        f"\n  {header_label:<{_COL_LABEL}}"
+        f"  {'polarctic':>{_COL_NUM + 3}}"
+        f"  {'arcticdb':>{_COL_NUM + 3}}"
+        f"  {'ratio':>{_COL_NUM + 1}}"
+        f"  overhead"
+    )
+    sep = "  " + "-" * (_COL_LABEL + 2 * (_COL_NUM + 5) + (_COL_NUM + 3) + 12)
 
-    rounds: int = args.rounds
+    print("\nResults (pyperf median wall-clock time)")
+    print(sep)
+    print(header)
+    print(sep)
+
+    noisy_cases: list[tuple[str, float, float]] = []
+    for label, polar_benchmark, baseline_benchmark in results:
+        polar_ms = _median_ms(polar_benchmark)
+        baseline_ms = _median_ms(baseline_benchmark)
+        print(_row(label, polar_ms, baseline_ms))
+
+        polar_noise = _coefficient_of_variation(polar_benchmark)
+        baseline_noise = _coefficient_of_variation(baseline_benchmark)
+        if max(polar_noise, baseline_noise) >= _NOISE_WARNING_THRESHOLD:
+            noisy_cases.append((label, polar_noise, baseline_noise))
+
+    print(sep)
+    print(
+        "  ratio > 1x -> polarctic faster than raw ArcticDB  |"
+        "  ratio < 1x -> overhead (positive overhead column)"
+    )
+
+    if noisy_cases:
+        print(
+            "\nPotentially noisy scenarios "
+            f"(coefficient of variation >= {_NOISE_WARNING_THRESHOLD:.0f}%):"
+        )
+        for label, polar_noise, baseline_noise in noisy_cases:
+            print(
+                f"  {label}: polarctic={polar_noise:.1f}%  arcticdb={baseline_noise:.1f}%"
+            )
+        print(
+            "  rerun with --rigorous or pin the benchmark to a CPU with --affinity"
+            " if these scenarios matter"
+        )
+
+
+def main() -> None:
+    runner = pyperf.Runner(
+        values=4,
+        processes=4,
+        min_time=0.2,
+        warmups=2,
+        metadata={"benchmark_suite": "polarctic comparison"},
+    )
+    args = runner.parse_args()
 
     with tempfile.TemporaryDirectory(prefix="polarctic_bench_") as tmp:
         store = _setup(Path(tmp))
         lib = store["lib"]
+        cases = _build_cases(lib)
 
-        pairs = _build_pairs(lib)
+        if not args.worker and not args.quiet:
+            print("Verifying benchmark outputs ...")
+        if not args.worker:
+            for case in cases:
+                if not args.quiet:
+                    print(f"  checking: {case.label}")
+                _verify_case(case)
 
-        # Warm-up pass (not timed)
-        print("Warming up ...")
-        for _, polar_fn, base_fn in pairs:
-            polar_fn()
-            base_fn()
-        gc.collect()
+        results: list[tuple[str, pyperf.Benchmark | None, pyperf.Benchmark | None]] = []
+        for case in cases:
+            polar_benchmark = runner.bench_time_func(
+                _benchmark_name(case.label, "polarctic"),
+                _time_callable,
+                case.polarctic_fn,
+                metadata={"implementation": "polarctic", "scenario": case.label},
+            )
+            baseline_benchmark = runner.bench_time_func(
+                _benchmark_name(case.label, "arcticdb"),
+                _time_callable,
+                case.baseline_fn,
+                metadata={"implementation": "arcticdb", "scenario": case.label},
+            )
+            results.append((case.label, polar_benchmark, baseline_benchmark))
 
-        # Timed pass
-        results: list[tuple[str, float, float]] = []
-        for label, polar_fn, base_fn in pairs:
-            print(f"  timing: {label}")
-            polar_ms = _median_ms(polar_fn, rounds)
-            base_ms = _median_ms(base_fn, rounds)
-            results.append((label, polar_ms, base_ms))
+        if args.worker or args.compare_to:
+            return
 
-        # Table
-        header_label = "Scenario"
-        header = (
-            f"\n  {header_label:<{_COL_LABEL}}"
-            f"  {'polarctic':>{_COL_NUM + 3}}"
-            f"  {'arcticdb':>{_COL_NUM + 3}}"
-            f"  {'ratio':>{_COL_NUM + 1}}"
-            f"  overhead"
-        )
-        sep = "  " + "-" * (_COL_LABEL + 2 * (_COL_NUM + 5) + (_COL_NUM + 3) + 12)
-
-        print(f"\nResults ({rounds} rounds, median wall-clock time)")
-        print(sep)
-        print(header)
-        print(sep)
-        for label, polar_ms, base_ms in results:
-            print(_row(label, polar_ms, base_ms))
-        print(sep)
-        print(
-            "  ratio > 1x -> polarctic faster than raw ArcticDB  |"
-            "  ratio < 1x -> overhead (positive overhead column)"
-        )
+        completed_results = [
+            (label, polar_benchmark, baseline_benchmark)
+            for label, polar_benchmark, baseline_benchmark in results
+            if polar_benchmark is not None and baseline_benchmark is not None
+        ]
+        _print_results(completed_results)
 
 
 if __name__ == "__main__":

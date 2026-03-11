@@ -1,0 +1,36 @@
+name: Benchmark Compare
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:
+
+jobs:
+  benchmark-compare:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v6
+
+    - name: Set up Python 3.13
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+
+    - name: Install polarctic
+      run: |
+        pip install .[dev]
+
+    - name: Run benchmark comparison
+      env:
+        PYTHONHASHSEED: "0"
+      run: |
+        python tests/bench_compare.py --rigorous --quiet --output benchmark-results.json
+
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-results-${{ github.sha }}
+        path: benchmark-results.json
