@@ -23,8 +23,6 @@ from arcticdb.version_store.processing import ExpressionNode
 from arcticdb_ext.util import RegexGeneric
 from arcticdb_ext.version_store import OperationType
 
-default_batch_size: int = 1000
-
 
 class PolarsToArcticDBTranslator:
     """
