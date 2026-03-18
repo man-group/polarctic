@@ -31,9 +31,15 @@ before the test and teardown removes the LMDB store afterwards.
 """
 
 
+FixtureInfo = dict[str, Any]
+
+
+def make_query_builder() -> Any:
+    return QueryBuilder()
+
+
 def test_parse_schema_returns_expected_schema(
-    init_arcticdb: dict[str, Any],
-    delete_arcticdb: Any,
+    init_arcticdb: FixtureInfo, delete_arcticdb: object
 ) -> None:
     """
     Test polarctic.parse_schema by passing the real Library instance and ensuring
@@ -50,10 +56,7 @@ def test_parse_schema_returns_expected_schema(
     assert "ts" in schema.names()
 
 
-def test_scan_arcticdb_reads_data(
-    init_arcticdb: dict[str, Any],
-    delete_arcticdb: Any,
-) -> None:
+def test_scan_arcticdb_reads_data(init_arcticdb: FixtureInfo, delete_arcticdb: object) -> None:
     info = init_arcticdb
     uri = info["uri"]
     lib_name = info["lib_name"]
@@ -66,22 +69,19 @@ def test_scan_arcticdb_reads_data(
         pdt.assert_frame_equal(pd_df, expected_df, check_dtype=False, check_like=True)
 
 
-def test_scan_arcticdb_with_filter(
-    init_arcticdb: dict[str, Any],
-    delete_arcticdb: Any,
-) -> None:
+def test_scan_articdb_with_filter(init_arcticdb: FixtureInfo, delete_arcticdb: object) -> None:
     info = init_arcticdb
     uri = info["uri"]
     lib = info["lib"]
     lib_name = info["lib_name"]
-    expected_tables: dict = info["tables"]
+    expected_tables: dict[str, pd.DataFrame] = info["tables"]
 
     filters = [pl.col("a") > 4, pl.col("b") < 19, ((pl.col("a") > 4) & (pl.col("b") < 19))]
-    qe1 = QueryBuilder()
+    qe1 = make_query_builder()
     qe1 = qe1[qe1["a"] > 4]
-    qe2 = QueryBuilder()
+    qe2 = make_query_builder()
     qe2 = qe2[qe2["b"] < 19]
-    qe3 = QueryBuilder()
+    qe3 = make_query_builder()
     qe3 = qe3[(qe3["a"] > 4) & (qe3["b"] < 19)]
     query_builders = [qe1, qe2, qe3]
 
@@ -96,10 +96,7 @@ def test_scan_arcticdb_with_filter(
             pdt.assert_frame_equal(pd_df, arctic_df.data, check_dtype=False, check_like=True)
 
 
-def test_scan_arcticdb_with_select(
-    init_arcticdb: dict[str, Any],
-    delete_arcticdb: Any,
-) -> None:
+def test_scan_arcticdb_with_select(init_arcticdb: FixtureInfo, delete_arcticdb: object) -> None:
     info = init_arcticdb
     uri = info["uri"]
     lib_name = info["lib_name"]
@@ -112,10 +109,7 @@ def test_scan_arcticdb_with_select(
         pdt.assert_frame_equal(pd_df, expected_df[["a", "b"]], check_dtype=False, check_like=True)
 
 
-def test_scan_arcticdb_library_source(
-    init_arcticdb: dict[str, Any],
-    delete_arcticdb: Any,
-) -> None:
+def test_scan_arcticdb_library_source(init_arcticdb: FixtureInfo, delete_arcticdb: object) -> None:
     """scan_arcticdb(lib, symbol) form produces the same result as the URI form."""
     info = init_arcticdb
     uri = info["uri"]
@@ -135,8 +129,7 @@ def test_scan_arcticdb_library_source(
 
 
 def test_scan_arcticdb_lazy_dataframe_source(
-    init_arcticdb: dict[str, Any],
-    delete_arcticdb: Any,
+    init_arcticdb: FixtureInfo, delete_arcticdb: object
 ) -> None:
     """scan_arcticdb(lazy_df) reads the same data as the Library form."""
     info = init_arcticdb
@@ -157,8 +150,7 @@ def test_scan_arcticdb_lazy_dataframe_source(
 
 
 def test_scan_arcticdb_lazy_dataframe_with_prefilter(
-    init_arcticdb: dict[str, Any],
-    delete_arcticdb: Any,
+    init_arcticdb: FixtureInfo, delete_arcticdb: object
 ) -> None:
     """ArcticDB-level QB pre-filter on the LazyDataFrame is preserved, and an
     additional Polars predicate is pushed down on top of it."""
@@ -167,7 +159,7 @@ def test_scan_arcticdb_lazy_dataframe_with_prefilter(
     symbol = "df1"
 
     # Pre-filter via ArcticDB QB: a > 4 (rows 5-9)
-    qb = QueryBuilder()
+    qb = make_query_builder()
     qb = qb[qb["a"] > 4]
     lazy_df = lib.read(symbol, query_builder=qb, lazy=True, output_format=OutputFormat.PYARROW)
 
@@ -176,7 +168,7 @@ def test_scan_arcticdb_lazy_dataframe_with_prefilter(
     result = lf.filter(pl.col("b") < 19).collect().to_pandas()
 
     # Expected: rows where a > 4 AND b < 19
-    combined_qb = QueryBuilder()
+    combined_qb = make_query_builder()
     combined_qb = combined_qb[(combined_qb["a"] > 4) & (combined_qb["b"] < 19)]
     expected = lib.read(symbol, query_builder=combined_qb, output_format=OutputFormat.PANDAS).data
 
@@ -184,8 +176,7 @@ def test_scan_arcticdb_lazy_dataframe_with_prefilter(
 
 
 def test_scan_arcticdb_lazy_dataframe_with_column_selection(
-    init_arcticdb: dict[str, Any],
-    delete_arcticdb: Any,
+    init_arcticdb: FixtureInfo, delete_arcticdb: object
 ) -> None:
     """Column selection (select) is pushed down into the LazyDataFrame read."""
     info = init_arcticdb
@@ -201,8 +192,7 @@ def test_scan_arcticdb_lazy_dataframe_with_column_selection(
 
 
 def test_scan_arcticdb_lazy_dataframe_with_row_range(
-    init_arcticdb: dict[str, Any],
-    delete_arcticdb: Any,
+    init_arcticdb: FixtureInfo, delete_arcticdb: object
 ) -> None:
     """A pre-sliced LazyDataFrame keeps its base row_range when scanned."""
     info = init_arcticdb
@@ -227,8 +217,8 @@ def test_scan_arcticdb_lazy_dataframe_with_row_range(
 
 
 def test_scan_arcticdb_lazy_dataframe_with_schema_changing_projection(
-    init_arcticdb: dict[str, Any],
-    delete_arcticdb: Any,
+    init_arcticdb: FixtureInfo,
+    delete_arcticdb: object,
 ) -> None:
     """Schema-changing ArcticDB preprocessing is reflected in Polars schema and data."""
     info = init_arcticdb
