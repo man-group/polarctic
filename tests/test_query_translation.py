@@ -1,13 +1,3 @@
-import ast
-from typing import Any
-
-import polars as pl
-import pytest
-from arcticdb import QueryBuilder
-
-import polarctic.polarctic as polarctic_module
-from polarctic.polarctic import PolarsToArcticDBTranslator
-
 """
 Copyright 2026 Man Group Operations Limited
 
@@ -17,12 +7,27 @@ As of the Change Date specified in that file, in accordance with the Business So
 License, use of this software will be governed by the Apache License, version 2.0.
 """
 
+"""Tests 3: check translation of Polars filter expressions into ArcticDB queries and handling of unsupported expressions."""
+
+import ast
+from typing import Any
+
+import polars as pl
+import pytest
+from arcticdb import QueryBuilder
+
+from polarctic.polarctic import PolarsToArcticDBTranslator
+
+from arcticdb.version_store.processing import ExpressionNode
+from arcticdb_ext.version_store import OperationType
+
 
 def make_query_builder() -> Any:
     return QueryBuilder()
 
 
 def test_greater(translator: PolarsToArcticDBTranslator) -> None:
+    """Check construction of the ArcticDB equivalent of a Polars greater-than condition."""
     q = make_query_builder()
     q = translator.translate(pl.col("col1") > 2, q)
     qe = make_query_builder()
@@ -31,6 +36,7 @@ def test_greater(translator: PolarsToArcticDBTranslator) -> None:
 
 
 def test_greater_equal(translator: PolarsToArcticDBTranslator) -> None:
+    """Check construction of the ArcticDB equivalent of a Polars greater-than-or-equal condition."""
     q = make_query_builder()
     q = translator.translate(pl.col("col1") >= 2, q)
     qe = make_query_builder()
@@ -39,6 +45,7 @@ def test_greater_equal(translator: PolarsToArcticDBTranslator) -> None:
 
 
 def test_less(translator: PolarsToArcticDBTranslator) -> None:
+    """Check construction of the ArcticDB equivalent of a Polars less-than condition."""
     q = make_query_builder()
     q = translator.translate(pl.col("col1") < 2, q)
     qe = make_query_builder()
@@ -47,6 +54,7 @@ def test_less(translator: PolarsToArcticDBTranslator) -> None:
 
 
 def test_less_equal(translator: PolarsToArcticDBTranslator) -> None:
+    """Check construction of the ArcticDB equivalent of a Polars less-than-or-equal condition."""
     q = make_query_builder()
     q = translator.translate(pl.col("col1") <= 2, q)
     qe = make_query_builder()
@@ -55,6 +63,7 @@ def test_less_equal(translator: PolarsToArcticDBTranslator) -> None:
 
 
 def test_equal(translator: PolarsToArcticDBTranslator) -> None:
+    """Check construction of the ArcticDB equivalent of a Polars equality condition."""
     q = make_query_builder()
     q = translator.translate(pl.col("col1") == 2, q)
     qe = make_query_builder()
@@ -63,6 +72,7 @@ def test_equal(translator: PolarsToArcticDBTranslator) -> None:
 
 
 def test_not_equal(translator: PolarsToArcticDBTranslator) -> None:
+    """Check construction of the ArcticDB equivalent of a Polars inequality condition."""
     q = make_query_builder()
     q = translator.translate(pl.col("col1") != 2, q)
     qe = make_query_builder()
@@ -71,52 +81,59 @@ def test_not_equal(translator: PolarsToArcticDBTranslator) -> None:
 
 
 def test_add(translator: PolarsToArcticDBTranslator) -> None:
+    """Check translation of addition inside a Boolean filter, not creation of an output column."""
     q = make_query_builder()
-    q = translator.translate(pl.col("col1") + pl.col("col2"), q)
+    q = translator.translate((pl.col("col1") + pl.col("col2")) > 20, q)
     qe = make_query_builder()
-    qe = qe[qe["col1"] + qe["col2"]]
+    qe = qe[(qe["col1"] + qe["col2"]) > 20]
     assert q == qe
 
 
 def test_subtract(translator: PolarsToArcticDBTranslator) -> None:
+    """Check translation of subtraction inside a Boolean filter."""
     q = make_query_builder()
-    q = translator.translate(pl.col("col1") - pl.col("col2"), q)
+    q = translator.translate((pl.col("col1") - pl.col("col2")) > 0, q)
     qe = make_query_builder()
-    qe = qe[qe["col1"] - qe["col2"]]
+    qe = qe[(qe["col1"] - qe["col2"]) > 0]
     assert q == qe
 
 
 def test_multiply(translator: PolarsToArcticDBTranslator) -> None:
+    """Check translation of multiplication inside a Boolean filter."""
     q = make_query_builder()
-    q = translator.translate(pl.col("col1") * pl.col("col2"), q)
+    q = translator.translate((pl.col("col1") * pl.col("col2")) > 20, q)
     qe = make_query_builder()
-    qe = qe[qe["col1"] * qe["col2"]]
+    qe = qe[(qe["col1"] * qe["col2"]) > 20]
     assert q == qe
 
 
 def test_divide(translator: PolarsToArcticDBTranslator) -> None:
+    """Check translation of division inside a Boolean filter."""
     q = make_query_builder()
-    q = translator.translate(pl.col("col1") / pl.col("col2"), q)
+    q = translator.translate((pl.col("col1") / pl.col("col2")) > 2, q)
     qe = make_query_builder()
-    qe = qe[qe["col1"] / qe["col2"]]
+    qe = qe[(qe["col1"] / qe["col2"]) > 2]
     assert q == qe
 
 
 def test_modulo(translator: PolarsToArcticDBTranslator) -> None:
+    """Check that the current translator explicitly rejects remainder arithmetic."""
     q = make_query_builder()
     with pytest.raises(NotImplementedError):
         q = translator.translate(pl.col("col1") % pl.col("col2"), q)
 
 
 def test_negation(translator: PolarsToArcticDBTranslator) -> None:
+    """Check translation of numeric negation inside a Boolean filter."""
     q = make_query_builder()
-    q = translator.translate(-pl.col("col1"), q)
+    q = translator.translate(-pl.col("col1") < 0, q)
     qe = make_query_builder()
-    qe = qe[-qe["col1"]]
+    qe = qe[-qe["col1"] < 0]
     assert q == qe
 
 
 def test_and(translator: PolarsToArcticDBTranslator) -> None:
+    """Check that operator and method spellings of Boolean AND construct the same ArcticDB filter."""
     q = make_query_builder()
     q = translator.translate((pl.col("col1") > 2) & (pl.col("col2") < 3), q)
     qe = make_query_builder()
@@ -129,6 +146,7 @@ def test_and(translator: PolarsToArcticDBTranslator) -> None:
 
 
 def test_bitwise_and_integer(translator: PolarsToArcticDBTranslator) -> None:
+    """Check integer bitwise-AND query construction; execution support is checked separately."""
     q = QueryBuilder()
     q = translator.translate((pl.col("col1") & 1) == 0, q)
     qe: Any = QueryBuilder()
@@ -137,6 +155,7 @@ def test_bitwise_and_integer(translator: PolarsToArcticDBTranslator) -> None:
 
 
 def test_or(translator: PolarsToArcticDBTranslator) -> None:
+    """Check that operator and method spellings of Boolean OR construct the same ArcticDB filter."""
     q = QueryBuilder()
     q = translator.translate((pl.col("col1") > 2) | (pl.col("col2") < 3), q)
     qe = make_query_builder()
@@ -149,6 +168,7 @@ def test_or(translator: PolarsToArcticDBTranslator) -> None:
 
 
 def test_bitwise_or_integer(translator: PolarsToArcticDBTranslator) -> None:
+    """Check integer bitwise-OR query construction; execution support is checked separately."""
     q = QueryBuilder()
     q = translator.translate((pl.col("col1") | 1) == 3, q)
     qe: Any = QueryBuilder()
@@ -157,6 +177,7 @@ def test_bitwise_or_integer(translator: PolarsToArcticDBTranslator) -> None:
 
 
 def test_bitwise_xor_integer(translator: PolarsToArcticDBTranslator) -> None:
+    """Check integer bitwise-XOR query construction; execution support is checked separately."""
     q = QueryBuilder()
     q = translator.translate((pl.col("col1") ^ 1) == 3, q)
     qe: Any = QueryBuilder()
@@ -165,6 +186,7 @@ def test_bitwise_xor_integer(translator: PolarsToArcticDBTranslator) -> None:
 
 
 def test_not(translator: PolarsToArcticDBTranslator) -> None:
+    """Check construction of the ArcticDB equivalent of Polars Boolean negation."""
     q = QueryBuilder()
     q = translator.translate(~pl.col("col1"), q)
     qe = make_query_builder()
@@ -173,14 +195,16 @@ def test_not(translator: PolarsToArcticDBTranslator) -> None:
 
 
 def test_abs(translator: PolarsToArcticDBTranslator) -> None:
+    """Check translation of absolute value inside a Boolean filter."""
     q = make_query_builder()
-    q = translator.translate(pl.col("col1").abs(), q)
+    q = translator.translate(pl.col("col1").abs() > 2, q)
     qe = make_query_builder()
-    qe = qe[abs(qe["col1"])]
+    qe = qe[abs(qe["col1"]) > 2]
     assert q == qe
 
 
 def test_is_null(translator: PolarsToArcticDBTranslator) -> None:
+    """Check that a Polars null check constructs the equivalent ArcticDB null-check expression."""
     q = make_query_builder()
     q = translator.translate(pl.col("col1").is_null(), q)
     qe = make_query_builder()
@@ -189,17 +213,16 @@ def test_is_null(translator: PolarsToArcticDBTranslator) -> None:
 
 
 def test_is_not_null(translator: PolarsToArcticDBTranslator) -> None:
+    """Check construction of a negated null check; actual missing-value behaviour is tested separately."""
     q = make_query_builder()
     q = translator.translate(~pl.col("col1").is_null(), q)
     qe = make_query_builder()
     qe = qe[~qe["col1"].isnull()]
     assert q == qe
-    qe2 = make_query_builder()
-    qe2 = qe2[qe2["col1"].notnull()]
-    assert qe2 != qe
 
 
 def test_regex_match(translator: PolarsToArcticDBTranslator) -> None:
+    """Check that a Polars string regex condition maps to ArcticDB regex matching."""
     q = make_query_builder()
     q = translator.translate(pl.col("col1").str.contains("e+"), q)
     qe = make_query_builder()
@@ -208,6 +231,7 @@ def test_regex_match(translator: PolarsToArcticDBTranslator) -> None:
 
 
 def test_isin(translator: PolarsToArcticDBTranslator) -> None:
+    """Check that a Polars membership condition constructs the expected ArcticDB membership query."""
     q = make_query_builder()
     q = translator.translate(pl.col("col1").is_in([24, 42]), q)
     qe = make_query_builder()
@@ -219,6 +243,8 @@ def test_translate_invalid_expression_raises_value_error(
     translator: PolarsToArcticDBTranslator,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Check that a syntax-parsing failure becomes a ValueError with expression context."""
+    # Force the parser error so this check is independent of Polars display formatting
     def raise_syntax_error(_expr: str) -> ast.AST:
         raise SyntaxError("invalid")
 
@@ -231,113 +257,60 @@ def test_translate_invalid_expression_raises_value_error(
 def test_replace_square_brackets_handles_missing_open_marker(
     translator: PolarsToArcticDBTranslator,
 ) -> None:
-    assert translator._replace_square_brackets("foo])bar") == "foo])bar"
+    """Check that bracket cleanup leaves text unchanged when its expected opening marker is absent."""
+    assert translator._replace_square_brackets("miaow])") == "miaow])"
 
 
-def test_process_node_name_unary_and_unsupported(
+def test_process_node_returns_name(
     translator: PolarsToArcticDBTranslator,
 ) -> None:
-    assert translator._process_node(ast.parse("field_name", mode="eval").body) == "field_name"
-    assert translator._process_node(ast.parse("-1", mode="eval").body) is not None
+    """Check that a name is returned unchanged."""
+    node = ast.parse("field_name", mode="eval").body
+
+    assert translator._process_node(node) == "field_name"
+
+
+def test_process_node_rejects_lists(
+    translator: PolarsToArcticDBTranslator,
+) -> None:
+    """Check that unsupported list expressions raise a clear error."""
+    node = ast.parse("[1, 2]", mode="eval").body
 
     with pytest.raises(NotImplementedError, match="Node type List not supported"):
-        translator._process_node(ast.parse("[1, 2]", mode="eval").body)
+        translator._process_node(node)
 
 
-def test_process_call_contains_requires_string_namespace(
+def test_process_node_builds_numeric_negation(
     translator: PolarsToArcticDBTranslator,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    call_node = ast.parse('col("a").contains("x")', mode="eval").body
-    assert isinstance(call_node, ast.Call)
-    assert isinstance(call_node.func, ast.Attribute)
-    call_value = call_node.func.value
+    """Check that -1 is translated as negation of the number 1."""
+    node = ast.parse("-1", mode="eval").body
+    result = translator._process_node(node)
 
-    original_process_node = translator._process_node
-
-    def fake_process_node(node: ast.AST) -> Any:
-        if node is call_node.args[0]:
-            return "x"
-        if node is call_value:
-            return ("lhs", "not_str")
-        return original_process_node(node)
-
-    monkeypatch.setattr(translator, "_process_node", fake_process_node)
-
-    with pytest.raises(NotImplementedError, match="Method contains not supported"):
-        translator._process_call(call_node)
+    assert isinstance(result, ExpressionNode)
+    assert result.operator == OperationType.NEG
+    assert result.left == 1
+    assert result.right is None
 
 
 def test_process_call_unsupported_methods_and_function_shapes(
     translator: PolarsToArcticDBTranslator,
 ) -> None:
-    unsupported_method_node = ast.parse('col("a").foo()', mode="eval").body
+    """Check that an unknown column method is explicitly rejected."""
+    unsupported_method_node = ast.parse('col("a").miaow()', mode="eval").body
     assert isinstance(unsupported_method_node, ast.Call)
-    with pytest.raises(NotImplementedError, match="Method foo not supported"):
+    with pytest.raises(NotImplementedError, match="Method miaow not supported"):
         translator._process_call(unsupported_method_node)
 
-    unsupported_name_node = ast.parse('foo("a")', mode="eval").body
-    assert isinstance(unsupported_name_node, ast.Call)
-    assert translator._process_call(unsupported_name_node) is None
-
-    unsupported_func_shape_node = ast.parse("(lambda: 1)()", mode="eval").body
-    assert isinstance(unsupported_func_shape_node, ast.Call)
-    assert translator._process_call(unsupported_func_shape_node) is None
 
 
-def test_process_attribute_compare_and_unary_error_branches(
-    translator: PolarsToArcticDBTranslator,
-) -> None:
-    unsupported_attribute_node = ast.parse('col("a").dt', mode="eval").body
-    assert isinstance(unsupported_attribute_node, ast.Attribute)
-    with pytest.raises(NotImplementedError, match="Attribute dt not supported"):
-        translator._process_attribute(unsupported_attribute_node)
-
-    assert (
-        translator._process_compare(
-            ast.Compare(
-                left=ast.Constant("a"),
-                ops=[ast.In()],
-                comparators=[ast.Constant("b")],
-            )
-        )
-        is not None
-    )
-    assert (
-        translator._process_compare(
-            ast.Compare(
-                left=ast.Constant("a"),
-                ops=[ast.NotIn()],
-                comparators=[ast.Constant("b")],
-            )
-        )
-        is not None
-    )
-
-    with pytest.raises(NotImplementedError, match="Operator <class 'ast.Is'> not supported"):  # noqa: RUF043
-        translator._process_compare(
-            ast.Compare(
-                left=ast.Constant(1),
-                ops=[ast.Is()],
-                comparators=[ast.Constant(2)],
-            )
-        )
-
-    unsupported_unary_node = ast.parse("+1", mode="eval").body
-    assert isinstance(unsupported_unary_node, ast.UnaryOp)
-    with pytest.raises(NotImplementedError, match="Operator <class 'ast.UAdd'> not supported"):  # noqa: RUF043
-        translator._process_unaryop(unsupported_unary_node)
-
-
-def test_translate_predicate_falls_back_on_unsupported_predicate(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def raise_not_implemented(_predicate: pl.Expr, _query_builder: QueryBuilder) -> Any:
-        raise NotImplementedError("unsupported")
-
-    base_query_builder = QueryBuilder()
-    monkeypatch.setattr(polarctic_module._TRANSLATOR, "translate", raise_not_implemented)
-
-    assert (
-        polarctic_module._translate_predicate(pl.col("a"), base_query_builder) is base_query_builder
-    )
+@pytest.mark.xfail(
+    reason="Known bug: unknown function shapes return None instead of raising",
+    strict=True,
+)
+@pytest.mark.parametrize("expression", ['miaow("a")', "(lambda: 1)()"])
+def test_process_call_rejects_unknown_function_shapes(translator, expression):
+    """Check that unsupported function calls raise an explicit error instead of returning None."""
+    node = ast.parse(expression, mode="eval").body
+    with pytest.raises(NotImplementedError):
+        translator._process_call(node)

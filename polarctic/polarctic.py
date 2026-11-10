@@ -16,7 +16,6 @@ from typing import Any, cast, overload
 
 import numpy as np
 import polars as pl
-import pyarrow as pa
 from arcticdb import Arctic, LazyDataFrame, OutputFormat, QueryBuilder
 from arcticdb.version_store.library import Library, ReadRequest
 from arcticdb.version_store.processing import ExpressionNode
@@ -230,8 +229,9 @@ class PolarsToArcticDBTranslator:
                 return ExpressionNode.compose(left, OperationType.MUL, right)
             case ast.Div:
                 return ExpressionNode.compose(left, OperationType.DIV, right)
-            # ArcticDB overloads AND/OR/XOR for both boolean filter composition
-            # and integer bitwise expressions, so the same mapping handles both.
+            # Map these operators to ArcticDB expression nodes.
+            # Integer bitwise queries can be constructed, but execution is not
+            # currently supported, as documented by the execution tests
             case ast.BitOr:
                 return ExpressionNode.compose(left, OperationType.OR, right)
             case ast.BitAnd:
@@ -263,7 +263,7 @@ def parse_schema(
 ) -> pl.Schema:
     lazy_source = cast(
         LazyDataFrame,
-        lib.read(symbol, as_of=as_of, output_format=OutputFormat.PYARROW, lazy=True),
+        lib.read(symbol, as_of=as_of, output_format=OutputFormat.POLARS, lazy=True),
     )
     return cast(pl.Schema, lazy_source._collect_schema())  # type: ignore[attr-defined]
 
@@ -308,9 +308,9 @@ def _iter_read_request_batches(
             if rr.row_range is not None and rr.row_range[1] is not None:
                 end = min(end, rr.row_range[1])
             rr = rr._replace(row_range=(base_start, end))
-        arrow_table = cast(pa.Table, lib.read(**rr._asdict()).data)
-        if arrow_table.num_rows > 0:
-            yield cast(pl.DataFrame, pl.from_arrow(arrow_table, rechunk=False))
+        frame = cast(pl.DataFrame, lib.read(**rr._asdict()).data)
+        if frame.height > 0:
+            yield frame
         return
 
     # Streaming path: yield fixed-size batches so Polars can process them incrementally.
@@ -344,13 +344,13 @@ def _iter_read_request_batches(
             break
 
         batch_request = read_request._replace(row_range=(batch_start, batch_end))
-        arrow_table = cast(pa.Table, lib.read(**batch_request._asdict()).data)
-        rows_read = arrow_table.num_rows
+        frame = cast(pl.DataFrame, lib.read(**batch_request._asdict()).data)
+        rows_read = frame.height
 
         if rows_read == 0:
             break
 
-        yield cast(pl.DataFrame, pl.from_arrow(arrow_table, rechunk=False))
+        yield frame
 
         read_offset += rows_read
         if remaining_rows is not None:
@@ -381,8 +381,8 @@ def _register_arctic_source(
         nonlocal _cached_read_request
         if _cached_read_request is None:
             base = read_request_getter()
-            if base.output_format != OutputFormat.PYARROW:
-                base = base._replace(output_format=OutputFormat.PYARROW)
+            if base.output_format != OutputFormat.POLARS:
+                base = base._replace(output_format=OutputFormat.POLARS)
             _cached_read_request = base
         return _cached_read_request
 
@@ -494,14 +494,14 @@ def scan_arcticdb(
             symbol,
             as_of=as_of,
             lazy=True,
-            output_format=OutputFormat.PYARROW,
+            output_format=OutputFormat.POLARS,
         ),
     )
 
     return _register_arctic_source(
         lib=lib,
-        # _collect_schema() reads the schema from symbol metadata (no data IO),
-        # which is faster than parse_schema()'s row_range=(0,1) data read.
+        # Discover the schema through ArcticDB's lazy metadata interface
+        # without collecting the table rows
         schema_getter=lambda: cast(pl.Schema, base_lazy_source._collect_schema()),  # type: ignore[attr-defined]
         read_request_getter=lambda: cast(
             ReadRequest,
