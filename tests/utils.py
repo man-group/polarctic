@@ -92,3 +92,64 @@ def backend_frame(reads: list[ObservedRead]) -> pl.DataFrame:
     """Combine data returned directly by ArcticDB."""
     assert reads, "No executing ArcticDB read was observed"
     return pl.concat([read.data for read in reads])
+
+
+
+@contextmanager
+def collect_storage_stats():
+    """Collect fresh standard and enterprise stats inside the block."""
+    from arcticdb.toolbox import query_stats as qs
+    from arcticdb_ext.tools import query_stats as core_qs
+    from arcticdb_enterprise_ext import query_stats as enterprise_qs
+
+    # Use both existing trackers and their result functions
+    trackers = [
+        ("core", qs, qs.get_query_stats),
+        ("enterprise", enterprise_qs, enterprise_qs.get_stats),
+    ]
+
+    # Do not reset or disable another collector's measurements
+    if core_qs.is_enabled() or enterprise_qs.is_enabled():
+        raise RuntimeError("Another query-stats collector is already enabled")
+
+    result = {}
+    enabled = []
+
+    try:
+        # Clear old measurements and start recording
+        for _, tracker, _ in trackers:
+            tracker.reset_stats()
+            tracker.enable()
+            enabled.append(tracker)
+
+        yield result
+
+    finally:
+        # Stop recording, including when the block raises an error
+        for tracker in reversed(enabled):
+            tracker.disable()
+
+        # Keep the two trackers' results separate
+        for name, _, getter in trackers:
+            result[name] = getter()
+
+
+def storage_read_count(stats, key_type):
+    """Add the S3 read counts for a key type from both trackers."""
+    total = 0
+
+    for snapshot in stats.values():
+        # Find S3 read measurements in this tracker's results
+        operations = snapshot.get("storage_operations", {})
+        reads = operations.get("S3_GetObject", {})
+
+        # We need counts grouped by key type, not one overall count
+        if "count" in reads:
+            raise AssertionError(
+                "This query-stats version lacks per-key-type S3 counters"
+            )
+
+        # Missing entries contribute zero
+        total += reads.get(key_type, {}).get("count", 0)
+
+    return total

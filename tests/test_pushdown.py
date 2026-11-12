@@ -9,12 +9,15 @@ License, use of this software will be governed by the Apache License, version 2.
 
 """Tests 2: check ArcticDB read requests and intermediate Polars results."""
 
+import datetime as dt
+import pandas as pd
 import polars as pl
 from arcticdb import QueryBuilder
 from polars.testing import assert_frame_equal
 
 import polarctic.polarctic as pc
 from tests.utils import backend_frame, observe_reads, override_batch_hint
+import pytest
 
 
 def test_predicate_is_executed_by_arcticdb(arctic_source, sample_data):
@@ -44,6 +47,47 @@ def test_predicate_is_executed_by_arcticdb(arctic_source, sample_data):
 
     # ArcticDB must already have returned only matching rows (a correct final result alone could hide filtering done only in Polars)
     assert_frame_equal(backend_frame(reads), expected)
+    assert_frame_equal(actual, expected)
+
+
+@pytest.mark.xfail(
+    reason="Known bug: timestamp-index predicate does not produce correctly filtered rows",
+    strict=True,
+    raises=AssertionError,
+)
+def test_timeseries_index_predicate_is_executed_by_arcticdb(arctic_source):
+    """Check that ArcticDB applies the filter to the stored datetime index."""
+    lib = arctic_source.library
+
+    # Create nine daily timestamps, from January 1 to January 9.
+    timestamps = pd.date_range("2020-01-01", periods=9, name="timestamp")
+
+    # Use timestamp as the pandas index so ArcticDB stores a timeseries index
+    lib.write("timeseries", pd.DataFrame({"a": range(9)}, index=timestamps))
+
+    # Describe the same data in Polars to calculate the expected result
+    data = pl.DataFrame({
+        "timestamp": pl.Series(timestamps.to_numpy(), dtype=pl.Datetime("ns")),
+        "a": list(range(9)),
+    })
+
+    # Include January 4, but exclude January 7; both boundary rows exist
+    predicate = (
+        (pl.col("timestamp") >= dt.datetime(2020, 1, 4))
+        & (pl.col("timestamp") < dt.datetime(2020, 1, 7))
+    )
+    expected = data.filter(predicate)
+
+      # Disable batching to focus on time filtering
+    with override_batch_hint(None):
+        # Record requests and data returned directly by ArcticDB
+        with observe_reads() as reads:
+            actual = pc.scan_arcticdb(lib, "timeseries", as_of=0).filter(predicate).collect()
+
+    # ArcticDB must already have returned only the matching rows
+    assert_frame_equal(backend_frame(reads), expected)
+
+    # The final Polarctic result must contain the same correct rows and types
     assert_frame_equal(actual, expected)
 
 
