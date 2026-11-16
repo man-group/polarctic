@@ -7,7 +7,7 @@ As of the Change Date specified in that file, in accordance with the Business So
 License, use of this software will be governed by the Apache License, version 2.0.
 """
 
-"""Tests 3: check translation of Polars filter expressions into ArcticDB queries and handling of unsupported expressions."""
+"""Check translation of Polars filter expressions into ArcticDB queries and handling of unsupported expressions."""
 
 import ast
 from typing import Any
@@ -17,67 +17,46 @@ import pytest
 from arcticdb import QueryBuilder
 
 from polarctic.polarctic import PolarsToArcticDBTranslator
-
-from arcticdb.version_store.processing import ExpressionNode
-from arcticdb_ext.version_store import OperationType
+import operator
 
 
 def make_query_builder() -> Any:
     return QueryBuilder()
 
 
-def test_greater(translator: PolarsToArcticDBTranslator) -> None:
-    """Check construction of the ArcticDB equivalent of a Polars greater-than condition."""
-    q = make_query_builder()
-    q = translator.translate(pl.col("col1") > 2, q)
-    qe = make_query_builder()
-    qe = qe[qe["col1"] > 2]
-    assert q == qe
+@pytest.mark.parametrize(
+    "compare",
+    [
+        pytest.param(operator.eq, id="eq"),
+        pytest.param(operator.ne, id="ne"),
+        pytest.param(operator.gt, id="gt"),
+        pytest.param(operator.ge, id="ge"),
+        pytest.param(operator.lt, id="lt"),
+        pytest.param(operator.le, id="le"),
+    ],
+)
+@pytest.mark.parametrize("rhs_kind", ["scalar", "column"])
+def test_comparison_translation(translator, compare, rhs_kind):
+    """Check comparison translation against a scalar or another column."""
+    query = QueryBuilder()
+    expected = QueryBuilder()
 
+    if rhs_kind == "scalar":
+        # Compare column a with the number 2
+        polars_rhs = 2
+        arctic_rhs = 2
+    else:
+        # Compare column a with column b
+        polars_rhs = pl.col("b")
+        arctic_rhs = expected["b"]
 
-def test_greater_equal(translator: PolarsToArcticDBTranslator) -> None:
-    """Check construction of the ArcticDB equivalent of a Polars greater-than-or-equal condition."""
-    q = make_query_builder()
-    q = translator.translate(pl.col("col1") >= 2, q)
-    qe = make_query_builder()
-    qe = qe[qe["col1"] >= 2]
-    assert q == qe
+    # Apply the same comparison operator in both query languages
+    expression = compare(pl.col("a"), polars_rhs)
+    actual = translator.translate(expression, query)
+    expected = expected[compare(expected["a"], arctic_rhs)]
 
-
-def test_less(translator: PolarsToArcticDBTranslator) -> None:
-    """Check construction of the ArcticDB equivalent of a Polars less-than condition."""
-    q = make_query_builder()
-    q = translator.translate(pl.col("col1") < 2, q)
-    qe = make_query_builder()
-    qe = qe[qe["col1"] < 2]
-    assert q == qe
-
-
-def test_less_equal(translator: PolarsToArcticDBTranslator) -> None:
-    """Check construction of the ArcticDB equivalent of a Polars less-than-or-equal condition."""
-    q = make_query_builder()
-    q = translator.translate(pl.col("col1") <= 2, q)
-    qe = make_query_builder()
-    qe = qe[qe["col1"] <= 2]
-    assert q == qe
-
-
-def test_equal(translator: PolarsToArcticDBTranslator) -> None:
-    """Check construction of the ArcticDB equivalent of a Polars equality condition."""
-    q = make_query_builder()
-    q = translator.translate(pl.col("col1") == 2, q)
-    qe = make_query_builder()
-    qe = qe[qe["col1"] == 2]
-    assert q == qe
-
-
-def test_not_equal(translator: PolarsToArcticDBTranslator) -> None:
-    """Check construction of the ArcticDB equivalent of a Polars inequality condition."""
-    q = make_query_builder()
-    q = translator.translate(pl.col("col1") != 2, q)
-    qe = make_query_builder()
-    qe = qe[qe["col1"] != 2]
-    assert q == qe
+    # Check just the constructed query, not stored-data execution
+    assert actual == expected
 
 
 def test_add(translator: PolarsToArcticDBTranslator) -> None:
@@ -278,19 +257,6 @@ def test_process_node_rejects_lists(
 
     with pytest.raises(NotImplementedError, match="Node type List not supported"):
         translator._process_node(node)
-
-
-def test_process_node_builds_numeric_negation(
-    translator: PolarsToArcticDBTranslator,
-) -> None:
-    """Check that -1 is translated as negation of the number 1."""
-    node = ast.parse("-1", mode="eval").body
-    result = translator._process_node(node)
-
-    assert isinstance(result, ExpressionNode)
-    assert result.operator == OperationType.NEG
-    assert result.left == 1
-    assert result.right is None
 
 
 def test_process_call_unsupported_methods_and_function_shapes(

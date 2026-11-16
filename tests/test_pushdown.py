@@ -7,7 +7,7 @@ As of the Change Date specified in that file, in accordance with the Business So
 License, use of this software will be governed by the Apache License, version 2.0.
 """
 
-"""Tests 2: check ArcticDB read requests and intermediate Polars results."""
+"""Check ArcticDB read requests and intermediate Polars results."""
 
 import datetime as dt
 import pandas as pd
@@ -29,7 +29,14 @@ def test_predicate_is_executed_by_arcticdb(arctic_source, sample_data):
     # Build the ArcticDB query and the expected result in Polars
     qb = QueryBuilder()
     qb = qb[qb["a"] > 3]
+
     expected = sample_data.filter(pl.col("a") > 3)
+
+    # Ensure this dataset contains both matching and nonmatching rows
+    if not 0 < expected.height < sample_data.height:
+        raise RuntimeError(
+            "The test data must contain matching and nonmatching rows"
+            )
 
     # Disable batching to focus on filtering and exclude any streaming effects
     with override_batch_hint(None):
@@ -41,12 +48,17 @@ def test_predicate_is_executed_by_arcticdb(arctic_source, sample_data):
                 .collect()
             )
     
-    # Check that a real read happened and received the expected query
-    assert reads
-    assert all(read.kwargs["query_builder"] == qb for read in reads)
+    # With batching disabled, expect exactly one executing backend read
+    assert len(reads) == 1
+    read = reads[0]
 
-    # ArcticDB must already have returned only matching rows (a correct final result alone could hide filtering done only in Polars)
-    assert_frame_equal(backend_frame(reads), expected)
+    # Check the exact query sent to ArcticDB
+    assert read.kwargs["query_builder"] == qb
+
+    # Check the table returned directly by ArcticDB
+    assert_frame_equal(read.data, expected)
+
+    # Check the final result correctness
     assert_frame_equal(actual, expected)
 
 
@@ -78,16 +90,26 @@ def test_timeseries_index_predicate_is_executed_by_arcticdb(arctic_source):
     )
     expected = data.filter(predicate)
 
-      # Disable batching to focus on time filtering
+    # Check that the input contains matching and nonmatching rows
+    if not 0 < expected.height < data.height:
+        raise RuntimeError(
+            "The test data must contain matching and nonmatching rows"
+        )
+
+    # Disable batching to focus on time filtering
     with override_batch_hint(None):
         # Record requests and data returned directly by ArcticDB
         with observe_reads() as reads:
             actual = pc.scan_arcticdb(lib, "timeseries", as_of=0).filter(predicate).collect()
 
-    # ArcticDB must already have returned only the matching rows
-    assert_frame_equal(backend_frame(reads), expected)
+    # Check that exactly one executing read happened
+    assert len(reads) == 1
+    read = reads[0]
 
-    # The final Polarctic result must contain the same correct rows and types
+    # ArcticDB must already have returned the correctly filtered rows
+    assert_frame_equal(read.data, expected)
+
+    # Check the final Polarctic result too
     assert_frame_equal(actual, expected)
 
 
@@ -104,10 +126,10 @@ def test_projection_is_executed_by_arcticdb(arctic_source, sample_data):
             .collect()
         )
 
-    # Check that at least one executing ArcticDB read was recorded
+    # Check that at least one executing read happened
     assert reads
 
-    # Check which columns the connector requested from ArcticDB
+    # Every read should request only a and b from ArcticDB
     assert all(set(read.kwargs["columns"]) == {"a", "b"} for read in reads)
 
     # Check that ArcticDB actually returned only those columns
@@ -125,6 +147,12 @@ def test_filter_dependency_is_kept_until_filtering(arctic_source, sample_data):
     # Calculate the expected result directly in Polars
     expected = sample_data.filter(pl.col("b") > 12).select("a")
 
+    # Ensure this dataset contains both matching and nonmatching rows
+    if not 0 < expected.height < sample_data.height:
+        raise RuntimeError(
+            "The test data must contain matching and nonmatching rows"
+            )
+
     # Disable batching to focus on filtering and exclude any streaming effects
     with override_batch_hint(None):
         # Record the backend requests and returned data
@@ -137,21 +165,23 @@ def test_filter_dependency_is_kept_until_filtering(arctic_source, sample_data):
                 .collect()
             )
 
-    # Check that an executing ArcticDB read was recorded
-    assert reads
+    # Expect one executing read since batching is disabled
+    assert len(reads) == 1
+    read = reads[0]
 
-    # Check that ArcticDB received a nonempty query (avoid exact query equality because Polars may rewrite the filter)
-    assert all(read.kwargs["query_builder"] != QueryBuilder() for read in reads)
+    # Check that the backend received filtering instructions (do not require 
+    # one exact query structure because Polars may rewrite the filter)
+    assert read.kwargs["query_builder"] != QueryBuilder()
 
-    # ArcticDB must already have returned the correct matching a values
-    assert_frame_equal(backend_frame(reads).select("a"), expected)
+    # The backend must already have returned the correct matching a values
+    assert_frame_equal(read.data.select("a"), expected)
 
     # Check final values, column order and types (equality also checks that b is not included in the final output)
     assert_frame_equal(actual, expected)
 
 
 def test_polars_calculation_is_not_added_to_backend_query(arctic_source, sample_data):
-    """Check that Polars creates the calculated column after receiving backend data, and does not use backend pushdown."""
+    """Check that Polars creates the calculated column after the backend read."""
     lib = arctic_source.library
     lib.write("data", sample_data)
     
@@ -163,17 +193,18 @@ def test_polars_calculation_is_not_added_to_backend_query(arctic_source, sample_
             .collect()
         )
 
-    # Check that an executing ArcticDB read was recorded
+    # Check that at least one executing read happened
     assert reads
 
-    # The backend query should be empty (no calculation was sent to ArcticDB)
+    # No read should send the calculation to ArcticDB
     assert all(read.kwargs["query_builder"] == QueryBuilder() for read in reads)
 
     # ArcticDB should not return c (Polars creates it afterwards)
     assert all("c" not in read.data.columns for read in reads)
 
-    # Check that the final result includes the correct calculated values, column order and types
-    assert_frame_equal(actual, sample_data.with_columns(c=pl.col("a") + pl.col("b")))
+    # Check that the final result includes the correct calculated values
+    expected = sample_data.with_columns(c=pl.col("a") + pl.col("b"))
+    assert_frame_equal(actual, expected)
 
 
 def test_polars_grouping_is_not_added_to_backend_query(arctic_source, sample_data):
@@ -191,17 +222,16 @@ def test_polars_grouping_is_not_added_to_backend_query(arctic_source, sample_dat
             .collect()
         )
 
-    # Check that an executing ArcticDB read was recorded
+    # Check that at least one executing read happened
     assert reads
 
-    # The backend query should be empty (no grouping was sent to ArcticDB)
+    # No read should send grouping instructions to ArcticDB
     assert all(read.kwargs["query_builder"] == QueryBuilder() for read in reads)
 
     # ArcticDB should return the input rows, not one summary row per desk
     assert backend_frame(reads).height == sample_data.height
 
-    # Calculate the expected average for each desk directly in Polars,
-    # then sort by desk so the comparison uses a predictable row order.
+    # Calculate the expected averages directly in Polars (sorting makes the result order predictable)
     expected = (
         sample_data.group_by("desk")
         .agg(pl.col("b").mean())
@@ -212,8 +242,8 @@ def test_polars_grouping_is_not_added_to_backend_query(arctic_source, sample_dat
     assert_frame_equal(actual, expected)
 
 
-def test_planning_does_not_read_table_rows(arctic_source, sample_data):
-    """Check that building the query and discovering its schema do not execute table-row reads."""
+def test_planning_does_not_execute_library_read(arctic_source, sample_data):
+    """Check that planning does not execute a non-lazy Library.read call."""
     # Write the data before recording, so setup is not part of the observation
     lib = arctic_source.library
     lib.write("data", sample_data)
@@ -239,5 +269,5 @@ def test_planning_does_not_read_table_rows(arctic_source, sample_data):
     # Now collection should have triggered at least one executing read
     assert collection_reads
 
-    # This observer watches Library.read calls only. It does not prove that planning read 
-    # no table-data storage keys through lower-level ArcticDB functions.
+    # This observer watches Library.read calls, not lower-level storage operations.
+    # Follow-up: use query statistics to verify index reads without TABLE_DATA reads

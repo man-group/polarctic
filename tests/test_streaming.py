@@ -7,7 +7,7 @@ As of the Change Date specified in that file, in accordance with the Business So
 License, use of this software will be governed by the Apache License, version 2.0.
 """
 
-"""Tests 6: check complete batched results, filtering, and limit order."""
+"""Check complete batched results, filtering, and limit order."""
 
 import polars as pl
 import pytest
@@ -118,6 +118,12 @@ def test_filtered_batches_do_not_stop_at_empty_or_partial_chunk(arctic_source, p
     # Calculate all matching rows independently using only Polars
     expected = oracle(data, lambda frame: frame.filter(predicate))
 
+    # Every case should exclude some rows (the no-matches case deliberately keeps none)
+    if expected.height >= data.height:
+        raise RuntimeError(
+            "The predicate must remove rows from the test input"
+        )
+
     # Use a three-row hint and record the reader's emitted batches
     with override_batch_hint(3) as batches:
         # Also record the requests sent to ArcticDB and its returned tables
@@ -151,15 +157,40 @@ def test_polars_filter_and_limit_orders_are_distinct(arctic_source, sample_data,
     lib = arctic_source.library
     lib.write("data", sample_data)
 
-    # Filter first, then take two matching rows (here those rows have a values of 2 and 3)
-    first = pc.scan_arcticdb(lib, "data", as_of=0).filter(pl.col("a") > 1).head(2).collect(engine=engine)
-    # Take two source rows first, then filter just those rows (their a values are 0 and 1, so neither matches and the result is empty)
-    second = pc.scan_arcticdb(lib, "data", as_of=0).head(2).filter(pl.col("a") > 1).collect(engine=engine)
+    predicate = pl.col("a") > 1
 
-    # Compare each result with the same operation order applied in Polars
-    assert_frame_equal(first, sample_data.filter(pl.col("a") > 1).head(2))
-    assert_frame_equal(second, sample_data.head(2).filter(pl.col("a") > 1))
+    # Check the filter before a limit removes any rows
+    filtered = sample_data.filter(predicate)
+    if not 0 < filtered.height < sample_data.height:
+        raise RuntimeError(
+            "The test data must contain matching and nonmatching rows"
+        )
 
+    # Filter first, then take two matching rows
+    expected_first = filtered.head(2)
+
+    # Take two source rows first, then filter those rows
+    expected_second = sample_data.head(2).filter(predicate)
+
+    # Execute filtering before the limit through Polarctic
+    first = (
+        pc.scan_arcticdb(lib, "data", as_of=0)
+        .filter(predicate)
+        .head(2)
+        .collect(engine=engine)
+    )
+
+    # Execute the same operations in the opposite order through Polarctic
+    second = (
+        pc.scan_arcticdb(lib, "data", as_of=0)
+        .head(2)
+        .filter(predicate)
+        .collect(engine=engine)
+    )
+
+    # Compare the results correctness
+    assert_frame_equal(first, expected_first)
+    assert_frame_equal(second, expected_second)
 
 
 @pytest.mark.parametrize(
@@ -182,6 +213,13 @@ def test_filtered_limit_reaches_late_matching_rows(arctic_source, request, engin
 
     # Only a=4 and a=5 match, with labels "e" and "f"
     predicate = pl.col("a") >= 4
+
+    # Check matching rows before the output limit is applied (a zero limit intentionally gives an empty final result)
+    filtered = data.filter(predicate)
+    if not 0 < filtered.height < data.height:
+        raise RuntimeError(
+            "The test data must contain matching and nonmatching rows"
+        )
 
     def apply(frame):
         # Filtering comes first: head(1) should therefore return the row with a=4 and label="e"
@@ -225,7 +263,10 @@ def test_filtered_limit_reaches_late_matching_rows(arctic_source, request, engin
     # Therefore, do not require a translation attempt for that case
     if fallback and limit > 0:
         # Check that we actually triggered the deliberate translation failure
-        assert calls, "The forced-fallback translator was never called"
+        if not calls:
+            raise RuntimeError(
+                "The forced-fallback translator was never called"
+            )
 
     # Check complete values, column names and types
     assert_frame_equal(actual, expected)
@@ -319,9 +360,18 @@ def test_polars_processing_combines_with_pushdown(arctic_source, sample_data, en
     lib = arctic_source.library
     lib.write("data", sample_data)
 
+    predicate = pl.col("a") >= 1
+
+    # Check the filter before grouping reduces the number of rows
+    filtered = sample_data.filter(predicate)
+    if not 0 < filtered.height < sample_data.height:
+        raise RuntimeError(
+            "The test data must contain matching and nonmatching rows"
+        )
+
     def apply(frame):
         # First filter rows, then select grouping inputs, then calculate averages
-        return frame.filter(pl.col("a") >= 1).select("desk", "b").group_by("desk").agg(
+        return frame.filter(predicate).select("desk", "b").group_by("desk").agg(
             pl.col("b").mean()
         ).sort("desk")
 

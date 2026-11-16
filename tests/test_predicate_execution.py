@@ -7,7 +7,7 @@ As of the Change Date specified in that file, in accordance with the Business So
 License, use of this software will be governed by the Apache License, version 2.0.
 """
 
-"""Tests 4: execute filters, rather than only compare constructed queries."""
+"""Check filter execution rather than only compare constructed queries."""
 
 import datetime as dt
 
@@ -17,7 +17,14 @@ from arcticdb import QueryBuilder
 from polars.testing import assert_frame_equal
 
 import polarctic.polarctic as pc
-from tests.utils import backend_frame, observe_reads, oracle, override_batch_hint
+from tests.utils import observe_reads, oracle, override_batch_hint
+
+
+# Known failure groups:
+# - INCORRECT_FILTER: arithmetic, column-dependent or quoted-string filters return incorrect rows.
+# - INTEGER_BITWISE: ArcticDB rejects the translated integer AND/OR/XOR queries.
+# - MISSING_FALLBACK: unsupported filters are lost instead of being applied in Polars.
+# - LITERAL_OPTION: literal=True is ignored, so literal text is treated as a regex.
 
 
 INCORRECT_FILTER = pytest.mark.xfail(
@@ -54,6 +61,8 @@ PREDICATE_CASES = [
     pytest.param(pl.col("a") <= 2, id="le"),
     pytest.param(pl.col("a") == 2, id="eq"),
     pytest.param(pl.col("a") != 2, id="ne"),
+    pytest.param(pl.col("a") > (pl.col("b") - 12), id="column-gt", marks=INCORRECT_FILTER),
+    pytest.param(pl.col("a") == (pl.col("b") - 10), id="column-eq", marks=INCORRECT_FILTER),
     pytest.param((pl.col("a") + pl.col("b")) > 14, id="add", marks=INCORRECT_FILTER),
     pytest.param((pl.col("b") - pl.col("a")) == 10, id="subtract", marks=INCORRECT_FILTER),
     pytest.param((pl.col("a") * 2) > 5, id="multiply"),
@@ -74,13 +83,19 @@ PREDICATE_CASES = [
 
 @pytest.mark.parametrize("predicate", PREDICATE_CASES)
 def test_predicate_matches_polars(arctic_source, sample_data, predicate):
-    """Check that executing each filter translated to ArcticDB returns correct results, allowing native execution or fallback."""
+    """Check each filter's result, allowing native execution or Polars fallback."""
     # Write the test data into the temporary library
     lib = arctic_source.library
     lib.write("data", sample_data)
 
     # Calculate the expected result independently using only Polars
     expected = oracle(sample_data, lambda frame: frame.filter(predicate))
+
+    # Ensure this dataset contains both matching and nonmatching rows
+    if not 0 < expected.height < sample_data.height:
+        raise RuntimeError(
+            "The test data must contain matching and nonmatching rows"
+        )
 
     # Disable batching so this test focuses on filtering.
     # Create the scan inside the block so it receives this override
@@ -124,9 +139,11 @@ def test_required_native_predicate_is_executed_by_arcticdb(arctic_source, sample
     # Calculate the expected result independently using only Polars
     expected = oracle(sample_data, lambda frame: frame.filter(predicate))
 
-    # Every chosen predicate must remove some rows. Otherwise an unfiltered
-    # backend read could accidentally pass the backend equality check
-    assert 0 < expected.height < sample_data.height
+    # Ensure this dataset contains both matching and nonmatching rows
+    if not 0 < expected.height < sample_data.height:
+        raise RuntimeError(
+            "The test data must contain matching and nonmatching rows"
+        )
 
     # Disable batching so this test focuses on filtering
     with override_batch_hint(None):
@@ -138,20 +155,19 @@ def test_required_native_predicate_is_executed_by_arcticdb(arctic_source, sample
                 .collect()
             )
 
-    # Check that at least one executing ArcticDB read was recorded
-    assert reads
+    # Batching is disabled, so expect one executing read
+    assert len(reads) == 1
+    read = reads[0]
 
-    # Check that every read received a nonempty ArcticDB query
-    for read in reads:
-        query = read.kwargs.get("query_builder")
-        assert isinstance(query, QueryBuilder)
-        assert query != QueryBuilder()
+    # Check that ArcticDB received a nonempty query.
+    query_builder = read.kwargs.get("query_builder")
+    assert isinstance(query_builder, QueryBuilder)
+    assert query_builder != QueryBuilder()
 
-    # ArcticDB must already have returned the correct filtered rows.
-    # Filtering only afterwards in Polars would not pass this check
-    assert_frame_equal(backend_frame(reads), expected)
+    # ArcticDB must already have returned the correctly filtered rows.
+    assert_frame_equal(read.data, expected)
 
-    # Check that the final result preserves the correct rows and types
+    # Check the final result too.
     assert_frame_equal(actual, expected)
 
 
@@ -174,6 +190,13 @@ def test_translation_failure_still_filters_rows(arctic_source, sample_data, monk
     monkeypatch.setattr(pc._TRANSLATOR, "translate", fail)
 
     predicate = pl.col("a") > 2
+    expected = sample_data.filter(predicate)
+
+    # Ensure this dataset contains both matching and nonmatching rows
+    if not 0 < expected.height < sample_data.height:
+        raise RuntimeError(
+            "The test data must contain matching and nonmatching rows"
+        )
 
     # Disable batching and run the filter through the connector
     with override_batch_hint(None):
@@ -190,7 +213,7 @@ def test_translation_failure_still_filters_rows(arctic_source, sample_data, monk
 
     # Translation failed, but only matching rows should be returned, i.e., the 
     # connector must arrange Polars filtering instead of losing the filter
-    assert_frame_equal(actual, sample_data.filter(predicate))
+    assert_frame_equal(actual, expected)
 
 
 
@@ -231,6 +254,13 @@ def test_complex_predicates_preserve_all_conditions(arctic_source, sample_data, 
 
     # Pick the condition for this parameterised test run
     predicate = predicates[condition]
+    expected = sample_data.filter(predicate)
+
+    # Ensure this dataset contains both matching and nonmatching rows
+    if not 0 < expected.height < sample_data.height:
+        raise RuntimeError(
+            "The test data must contain matching and nonmatching rows"
+        )
 
     # Save the real translator and start a list of translation attempts
     calls = []
@@ -257,7 +287,7 @@ def test_complex_predicates_preserve_all_conditions(arctic_source, sample_data, 
         pytest.fail("The translator was never called")
 
     # Compare with the complete filter applied in Polars (every condition and option must remain effective)
-    assert_frame_equal(actual, sample_data.filter(predicate))
+    assert_frame_equal(actual, expected)
 
 
 @pytest.mark.parametrize("engine", ["in-memory", "streaming"])
@@ -295,6 +325,26 @@ def test_fallback_preserves_dependencies_and_operation_order(arctic_source, samp
         # Polars may keep this filter outside the connector, so this case checks combined processing rather than proving connector fallback
         return frame.with_columns(c=pl.col("a") + 1).filter((pl.col("c") % 2) == 0).select("c")
 
+    # Check the filter itself, before any later limit or column selection
+    if operation == "head_filter":
+        # Here the filter receives only the first two source rows
+        filter_input = sample_data.head(2)
+        filtered = filter_input.filter(predicate)
+    elif operation == "calculate_filter":
+        # Here the filter receives the data after Polars creates c
+        filter_input = sample_data.with_columns(c=pl.col("a") + 1)
+        filtered = filter_input.filter((pl.col("c") % 2) == 0)
+    else:
+        # The other cases filter the complete input before limiting/selecting
+        filter_input = sample_data
+        filtered = filter_input.filter(predicate)
+
+    # Ensure the filter keeps some input rows and removes others
+    if not 0 < filtered.height < filter_input.height:
+        raise RuntimeError(
+            "The filter input must contain matching and nonmatching rows"
+        )
+
     # Apply the same sequence to known input using only Polars
     expected = oracle(sample_data, apply)
 
@@ -309,6 +359,7 @@ def test_fallback_preserves_dependencies_and_operation_order(arctic_source, samp
     assert_frame_equal(actual, expected)
 
 
+# Modulo is unsupported by the translator, so the connector currently loses this combined filter instead of applying it in Polars
 @MISSING_FALLBACK
 def test_time_range_and_unsupported_filter_return_correct_rows(arctic_source, sample_data):
     """Check that a time condition and numeric conditions remain effective."""
@@ -327,6 +378,12 @@ def test_time_range_and_unsupported_filter_return_correct_rows(arctic_source, sa
 
     # Calculate the expected answer independently using only Polars
     expected = oracle(sample_data, apply)
+
+    # Ensure this dataset contains both matching and nonmatching rows
+    if not 0 < expected.height < sample_data.height:
+        raise RuntimeError(
+            "The test data must contain matching and nonmatching rows"
+        )
 
     # Disable batching to focus on the combined filter
     with override_batch_hint(None):

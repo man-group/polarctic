@@ -500,8 +500,8 @@ def scan_arcticdb(
 
     return _register_arctic_source(
         lib=lib,
-        # Discover the schema through ArcticDB's lazy metadata interface
-        # without collecting the table rows
+        # Discover the schema through ArcticDB's LazyDataFrame._collect_schema()
+        # without collecting the table data keys
         schema_getter=lambda: cast(pl.Schema, base_lazy_source._collect_schema()),  # type: ignore[attr-defined]
         read_request_getter=lambda: cast(
             ReadRequest,

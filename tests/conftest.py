@@ -161,6 +161,14 @@ def sample_data() -> pl.DataFrame:
     """Reusable input data, independent of any database."""
     return pl.DataFrame(
         {
+            # Keep ts first so a test can choose index_column=True when writing
+            "ts": pl.datetime_range(
+                dt.datetime(2020, 1, 1),
+                dt.datetime(2020, 1, 8),
+                interval="1d",
+                time_unit="ns",
+                eager=True,
+            ),
             "a": [0, 1, 2, 3, 4, 5, -5, -2],
             "b": [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 8.0, 9.0],
             "desk": [
@@ -172,13 +180,6 @@ def sample_data() -> pl.DataFrame:
                 "alpha", 'a"b', "[x]", "plain",
                 "beta", "x", "negative", "minus",
             ],
-            "ts": pl.datetime_range(
-                dt.datetime(2020, 1, 1),
-                dt.datetime(2020, 1, 8),
-                interval="1d",
-                time_unit="ns",
-                eager=True,
-            ),
         },
         schema_overrides={"a": pl.Int64, "b": pl.Float64},
     )

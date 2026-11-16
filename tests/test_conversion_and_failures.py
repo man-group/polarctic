@@ -7,7 +7,7 @@ As of the Change Date specified in that file, in accordance with the Business So
 License, use of this software will be governed by the Apache License, version 2.0.
 """
 
-"""Tests 5: check returned types, missing values, and useful failures."""
+"""Check returned types, missing values, and useful failures."""
 
 import datetime as dt
 
@@ -74,6 +74,15 @@ def test_null_string_filters_match_polars(arctic_source, predicate):
     lib = arctic_source.library
     lib.write("nulls", data)
 
+    # Calculate the expected answer independently using only Polars
+    expected = oracle(data, lambda frame: frame.filter(predicate))
+
+    # Ensure the filter keeps some rows and removes others
+    if not 0 < expected.height < data.height:
+        raise RuntimeError(
+            "The test data must contain matching and nonmatching rows"
+        )
+
     # Disable batching to focus on filtering and exclude any streaming effects
     with override_batch_hint(None):
         actual = (
@@ -81,9 +90,6 @@ def test_null_string_filters_match_polars(arctic_source, predicate):
             .filter(predicate)
             .collect()
         )
-
-    # Calculate the expected answer independently using only Polars
-    expected = oracle(data, lambda frame: frame.filter(predicate))
 
     # Check complete rows and types
     assert_frame_equal(actual, expected)
@@ -167,6 +173,17 @@ def test_sparse_string_columns_across_appended_segments(
         # Filter using text, but return only a (the reader must keep text available until filtering is finished)
         return frame.filter(predicates[operation]).select("a")
 
+    # Calculate the expected result before collecting through Polarctic
+    expected = oracle(expected_data, apply)
+
+    # The read case deliberately returns the complete table.
+    # Only the filtering cases should remove rows
+    if operation != "read":
+        if not 0 < expected.height < expected_data.height:
+            raise RuntimeError(
+                "The sparse test data must contain matching and nonmatching rows"
+            )
+
     # With a three-row hint, the first read contains only rows without text.
     # None matches text == "x", but a matching row exists in the next group.
     # The current batching bug stops before reaching that later match
@@ -185,9 +202,6 @@ def test_sparse_string_columns_across_appended_segments(
 
         actual = apply(query).collect(engine="streaming")
 
-    # Calculate the expected result independently using only Polars
-    expected = oracle(expected_data, apply)
-
     # Check all values, row order, column order and types
     assert_frame_equal(actual, expected)
 
@@ -205,8 +219,8 @@ def test_empty_results_keep_schema(arctic_source, sample_data, operation):
         # Start with an empty stored table with the full explicitly typed schema
         lib.write("empty", expected)
         query = pc.scan_arcticdb(lib, "empty", as_of=0)
-        # An empty pandas write can produce a physically stored index column. Use the actual backend representation 
-        # as the reference for this case (this checks that Polarctic preserves ArcticDB's empty-table output).
+        # Compare with the empty-table representation returned directly by ArcticDB.
+        # This checks that Polarctic preserves the backend output
         expected = lib.read("empty", as_of=0, output_format=OutputFormat.POLARS).data
 
     else:

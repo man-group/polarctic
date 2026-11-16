@@ -7,7 +7,7 @@ As of the Change Date specified in that file, in accordance with the Business So
 License, use of this software will be governed by the Apache License, version 2.0.
 """
 
-"""Tests 7: check version consistency during writes and isolation between query branches."""
+"""Check version consistency during writes and isolation between query branches."""
 
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
@@ -233,6 +233,17 @@ def test_branches_and_repeated_collection_do_not_share_instructions(arctic_sourc
         for name, query, operation in cases:
             # Calculate this branch's expected result using only Polars
             expected = oracle(sample_data, operation)
+
+            # Apply sanity check for the filtering operations
+            if name in {
+                "lower-filter",
+                "upper-filter",
+                "lower-filter-repeated",
+            }:
+                if not 0 < expected.height < sample_data.height:
+                    raise RuntimeError(
+                        "The branch filter needs matching and nonmatching rows"
+                    )
 
             # Collect the branch and compare values, order and types
             actual = query.collect()
