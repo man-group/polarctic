@@ -48,17 +48,9 @@ def test_numeric_widths_and_special_values_are_preserved(arctic_source):
     [
         # Keep rows where text is missing: a values 1 and 3
         pytest.param(pl.col("text").is_null(), id="null"),
-            
+
         # Keep rows where text is present: a values 0 and 2
-        pytest.param(
-            ~pl.col("text").is_null(),
-            id="not-null",
-            marks=pytest.mark.xfail(
-                reason="Known translator bug: negated null filter returns unfiltered rows",
-                strict=True, 
-                raises=AssertionError,
-            ),
-        ),
+        pytest.param(~pl.col("text").is_null(), id="not-null"),
     ]
 )
 def test_null_string_filters_match_polars(arctic_source, predicate):
@@ -106,15 +98,8 @@ def test_null_string_filters_match_polars(arctic_source, predicate):
         # Keep rows where text is missing
         "null",
 
-        # Keep rows where text is present (produced incorrect results in the recorded run)
-        pytest.param(
-            "not-null",
-            marks=pytest.mark.xfail(
-                reason="Known negated-null translation bug",
-                strict=True,
-                raises=AssertionError,
-            ),
-        ),
+        # Keep rows where text is present
+        "not-null",
 
         # Keep rows where text equals "x"
         "equals-x",

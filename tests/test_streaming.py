@@ -226,14 +226,11 @@ def test_filtered_limit_reaches_late_matching_rows(arctic_source, request, engin
         # (select label only to also test retaining a until filtering is finished).
         return frame.filter(predicate).head(limit).select("label")
 
-    # These combinations failed in the recorded run:
-    # - nonzero limits with forced fallback;
-    # - nonzero limits with a batch hint.
-    #
-    # Zero limits pass. Native single-read filtering also passes
-    if limit > 0 and (fallback or hint is not None):
+    # Nonzero limits with a batch hint fail when ArcticDB filters the rows (B2 bug).
+    # Zero limits, single reads and the Polars fallback pass
+    if limit > 0 and hint is not None and not fallback:
         request.node.add_marker(pytest.mark.xfail(
-            reason=("Known missing Polars fallback" if fallback else "Known B2 filtered-batching bug"),
+            reason="Known B2 filtered-batching bug",
             strict=True, raises=AssertionError,
         ))
 

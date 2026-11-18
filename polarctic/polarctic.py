@@ -54,6 +54,7 @@ class PolarsToArcticDBTranslator:
         if expr.startswith("[") and expr.endswith("]"):
             expr = expr[1:-1].strip()
 
+        # Turn Polars' ([ ... ]) grouping into normal ( ... ) brackets
         expr = self._replace_square_brackets(expr)
 
         # Preprocess to handle Polars-specific notation like [dyn int: 2]
@@ -63,6 +64,7 @@ class PolarsToArcticDBTranslator:
         try:
             expr_node = self._process_node(self._parse_expression(expr))
         except SyntaxError as e:
+            # Text Python cannot parse (e.g. timestamps) becomes a ValueError
             raise ValueError(f"Invalid Polars expression: {polars_expr}") from e
 
         return query_builder[expr_node]
@@ -278,16 +280,18 @@ def _get_library_from_uri(uri: str, lib_name: str) -> Library:
 def _translate_predicate(
     predicate: pl.Expr | None,
     query_builder: QueryBuilder | None = None,
-) -> QueryBuilder | None:
+) -> tuple[QueryBuilder | None, bool]:
+    """Return the query builder and whether ArcticDB applies the whole predicate."""
+    # No filter: nothing to translate
     if predicate is None:
-        return query_builder
-
-    base_query_builder = query_builder or QueryBuilder()
+        return query_builder, True
     try:
-        return cast(QueryBuilder, _TRANSLATOR.translate(predicate, base_query_builder))
+        # Turn the Polars filter into an ArcticDB filter
+        translated = _TRANSLATOR.translate(predicate, query_builder or QueryBuilder())
+        return cast(QueryBuilder, translated), True
     except (NotImplementedError, ValueError):
-        # Unsupported predicate for ArcticDB pushdown; fall back to Polars-side filtering
-        return query_builder
+        # ArcticDB cannot apply it: the caller must filter in Polars
+        return query_builder, False
 
 
 def _iter_read_request_batches(
@@ -397,11 +401,26 @@ def _register_arctic_source(
         if with_columns is not None:
             read_request = read_request._replace(columns=with_columns)
 
-        translated_predicate = _translate_predicate(predicate, read_request.query_builder)
+        # Translate the filter into an ArcticDB filter, if possible.
+        # If it can't be translated (e.g. it contains a cast), pushed_down is False
+        # and the filter is applied in Polars below
+        translated_predicate, pushed_down = _translate_predicate(
+            predicate, read_request.query_builder
+        )
+        # Only replace the query builder if translation produced a new one
         if translated_predicate is not read_request.query_builder:
             read_request = read_request._replace(query_builder=translated_predicate)
 
-        yield from _iter_read_request_batches(lib, read_request, n_rows, batch_size)
+        # Read the data from ArcticDB, in one go or in batches
+        batches = _iter_read_request_batches(lib, read_request, n_rows, batch_size)
+
+        # ArcticDB already applied the filter (or there is none): return batches as they are
+        if pushed_down or predicate is None:
+            # ArcticDB already filtered the rows
+            yield from batches
+        else:
+            # Polars does not filter again after a plugin, so filter each batch here
+            yield from (frame.filter(predicate) for frame in batches)
 
     return pl.io.plugins.register_io_source(  # type: ignore[attr-defined]
         io_source=source_generator,
