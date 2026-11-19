@@ -14,7 +14,7 @@ import datetime as dt
 import pandas as pd
 import polars as pl
 import pytest
-from arcticdb import Arctic, LibraryOptions, OutputFormat
+from arcticdb import Arctic, LibraryOptions, OutputFormat, QueryBuilder
 from arcticdb_ext.storage import KeyType
 from polars.testing import assert_frame_equal
 
@@ -84,7 +84,6 @@ def data_segment_layout(lib, symbol, version):
     return layout
 
 
-
 def test_schema_discovery_reads_no_table_data_keys(stats_library, sample_data):
     """Check that planning reads no table-data segments."""
     # Get this test's library and symbol
@@ -107,11 +106,6 @@ def test_schema_discovery_reads_no_table_data_keys(stats_library, sample_data):
     assert query_stats_operation_count(planning, "Memory_GetObject", "TABLE_INDEX") > 0
 
 
-@pytest.mark.xfail(
-    reason="Known bug: collection reloads the index obtained during schema discovery",
-    strict=True,
-    raises=AssertionError,
-)
 @pytest.mark.parametrize("hint", [None, 3], ids=["single-read", "batched"])
 def test_collection_reuses_schema_index(stats_library, sample_data, hint):
     """Check index reuse during single-read and batched collection."""
@@ -415,3 +409,88 @@ def test_stats_enabled_does_not_change_results(stats_library, sample_data):
 
     # Confirm that the measured execution actually recorded table-data reads
     assert query_stats_operation_count(stats, "Memory_GetObject", "TABLE_DATA") > 0
+
+
+def test_querybuilder_date_range_skips_slices(stats_library):
+    """Check whether QueryBuilder.date_range skips stored slices like read(date_range=...)."""
+    # Get the managed S3 library and this test's unique symbol
+    lib, symbol = stats_library
+
+    # Twelve daily rows, January 1 to January 12, with the timestamp as the index
+    data = pl.DataFrame(
+        {
+            "timestamp": pl.datetime_range(
+                dt.datetime(2020, 1, 1),
+                dt.datetime(2020, 1, 12),
+                interval="1d",
+                time_unit="ns",
+                eager=True,
+            ),
+            "a": list(range(12)),
+        }
+    )
+
+    # Write four separate three-day slices (one write and three appends)
+    lib.write(symbol, data.slice(0, 3), index_column=True)
+    for offset in [3, 6, 9]:
+        lib.append(symbol, data.slice(offset, 3), index_column=True)
+    version = 3
+
+    # The time range we ask for: January 4 to January 6 (both included)
+    start = pd.Timestamp("2020-01-04")
+    end = pd.Timestamp("2020-01-07") - pd.Timedelta(1, "ns")
+    expected = data.filter(pl.col("timestamp").is_between(start, end))
+
+    # Count how many stored slices overlap that range (end_index is exclusive)
+    layout = data_segment_layout(lib, symbol, version)
+    overlaps = (layout.index <= end) & (layout["end_index"] > start)
+    required = int(overlaps.sum())
+    total = len(layout)
+    if not 0 < required < total:
+        raise RuntimeError("The setup must create slices both inside and outside the range")
+
+    def count_reads(**read_kwargs):
+        """Read once with the given arguments; return the rows and the slices fetched."""
+        with collect_storage_stats() as stats:
+            result = lib.read(
+                symbol, as_of=version, output_format=OutputFormat.POLARS, **read_kwargs
+            ).data
+        return result, storage_read_count(stats, "TABLE_DATA")
+
+    # 1. Full read: shows that the counters work (expect one fetch per slice)
+    full, full_count = count_reads()
+    # 2. date_range as a read argument: the known way to skip slices
+    by_argument, argument_count = count_reads(date_range=(start, end))
+    # 3. date_range as a QueryBuilder step: the method we want to check
+    by_builder, builder_count = count_reads(query_builder=QueryBuilder().date_range((start, end)))
+    # 4. QueryBuilder date_range followed by row_range: what a streaming batch would use
+    first_batch, batch_count = count_reads(
+        query_builder=QueryBuilder().date_range((start, end)).row_range((0, 2))
+    )
+
+    # Print a small table (shown with pytest -s)
+    print(f"\nslices stored: {total}, slices overlapping the range: {required}")
+    print(f"full read:                          {full_count} slices fetched")
+    print(f"read(date_range=...):               {argument_count} slices fetched")
+    print(f"QueryBuilder().date_range(...):     {builder_count} slices fetched")
+    print(f"QueryBuilder date_range + row_range: {batch_count} slices fetched")
+
+    # The counters must work, and the known method must skip slices,
+    # otherwise the comparison below means nothing
+    assert full_count == total, "Counters did not record one fetch per slice"
+    assert argument_count == required, "read(date_range=...) did not skip slices"
+
+    # Every method must still return the right rows
+    assert_frame_equal(full, data)
+    assert_frame_equal(by_argument, expected)
+    assert_frame_equal(by_builder, expected)
+    assert_frame_equal(first_batch, expected.head(2))
+
+    # The actual question: does the QueryBuilder step skip slices too?
+    assert builder_count == required, (
+        f"QueryBuilder.date_range fetched {builder_count} slices, expected {required}"
+    )
+    assert batch_count <= required, (
+        f"QueryBuilder date_range + row_range fetched {batch_count} slices, expected at most {required}"
+    )
+

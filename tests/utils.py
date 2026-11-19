@@ -34,12 +34,18 @@ def observe_reads() -> Iterator[list[ObservedRead]]:
     original = Library.read
 
     def observe(self: Library, *args: Any, **kwargs: Any) -> Any:
-        # Copy the arguments, but keep the original index object.
-        # ArcticDB's preloaded index cannot be deep-copied
+        # Copy options such as QueryBuilder before ArcticDB can modify them.
+        # Do not deepcopy the preloaded index: it is a native object that cannot
+        # be pickled, and preserving its reference is appropriate for observation
         recorded = copy.deepcopy(
-            {name: value for name, value in kwargs.items() if name != "as_of"}
+            {
+                name: value
+                for name, value in kwargs.items()
+                if name != "as_of"
+            }
         )
 
+        # Retain the original version selector or preloaded index object.
         if "as_of" in kwargs:
             recorded["as_of"] = kwargs["as_of"]
 
