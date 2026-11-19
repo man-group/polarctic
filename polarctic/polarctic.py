@@ -13,6 +13,7 @@ import re
 from collections.abc import Callable, Iterator
 from functools import lru_cache
 from typing import Any, cast, overload
+from threading import Lock
 
 import numpy as np
 import polars as pl
@@ -429,17 +430,46 @@ def _register_arctic_source(
 
 
 def _scan_lazy_dataframe(source: LazyDataFrame) -> pl.LazyFrame:
-    """Register a Polars IO source backed by an existing ArcticDB LazyDataFrame.
+    """Register a source whose schema and reads use one resolved index."""
+    # Store the schema and read request together as they must describe the same stored version
+    resolved: tuple[pl.Schema, ReadRequest] | None = None
 
-    The LazyDataFrame may already carry ArcticDB-level QueryBuilder operations
-    (projections, filters). Any additional Polars predicates or
-    column selections are pushed down on top of those.
-    """
+    # Only one caller should perform the initial resolution
+    resolve_lock = Lock()
+
+    def resolve_source() -> tuple[pl.Schema, ReadRequest]:
+        nonlocal resolved
+
+        with resolve_lock:
+            if resolved is None:
+                # Discover the schema through ArcticDB, loading the index and saving it on the lazy source
+                schema = cast(pl.Schema, source._collect_schema())
+
+                preloaded_index = source._preloaded_index
+
+                # Stop if the expected ArcticDB setup did not happen (do not silently fall back to resolving "latest")
+                if preloaded_index is None:
+                    raise RuntimeError(
+                        "Schema discovery did not provide a preloaded index"
+                    )
+
+                # Build the request while preserving the source's existing columns, filters, row/date ranges and other read options
+                request = cast(ReadRequest, source._to_read_request())
+
+                # Tell later reads to use this resolved index instead of looking up the original version selector again
+                request = request._replace(as_of=preloaded_index)
+
+                # Cache both results from this one resolution
+                resolved = (schema, request)
+
+            return resolved
 
     return _register_arctic_source(
         lib=cast(Library, source.lib),
-        schema_getter=lambda: cast(pl.Schema, source._collect_schema()),  # type: ignore[attr-defined]
-        read_request_getter=lambda: cast(ReadRequest, source._to_read_request()),  # type: ignore[attr-defined]
+
+        # Both getters obtain their result from the same cached pair (either getter can be called first)
+        schema_getter=lambda: resolve_source()[0],
+        read_request_getter=lambda: resolve_source()[1],
     )
 
 
@@ -517,13 +547,5 @@ def scan_arcticdb(
         ),
     )
 
-    return _register_arctic_source(
-        lib=lib,
-        # Discover the schema through ArcticDB's LazyDataFrame._collect_schema()
-        # without collecting the table data keys
-        schema_getter=lambda: cast(pl.Schema, base_lazy_source._collect_schema()),  # type: ignore[attr-defined]
-        read_request_getter=lambda: cast(
-            ReadRequest,
-            base_lazy_source._to_read_request(),  # type: ignore[attr-defined]
-        ),
-    )
+    # URI and Library inputs also use the schema/index capture above
+    return _scan_lazy_dataframe(base_lazy_source)
