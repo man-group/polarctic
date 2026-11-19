@@ -18,7 +18,7 @@ from arcticdb import Arctic, LibraryOptions, OutputFormat
 from polars.testing import assert_frame_equal
 
 import polarctic.polarctic as pc
-from tests.utils import collect_storage_stats
+from tests.utils import collect_storage_stats, enable_polars_writes
 
 
 @pytest.fixture
@@ -33,6 +33,7 @@ def benchmark_data(tmp_path):
         name,
         library_options=LibraryOptions(rows_per_segment=10_000),
     )
+    enable_polars_writes(lib)
     start = dt.datetime(2020, 1, 1)
     data = pl.DataFrame({
         "timestamp": pl.datetime_range(

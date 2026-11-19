@@ -19,7 +19,7 @@ from arcticdb_ext.storage import KeyType
 from polars.testing import assert_frame_equal
 
 import polarctic.polarctic as pc
-from tests.utils import collect_storage_stats, observe_reads, oracle, override_batch_hint, query_stats_operation_count
+from tests.utils import collect_storage_stats, enable_polars_writes, observe_reads, oracle, override_batch_hint, query_stats_operation_count
 
 
 @pytest.fixture
@@ -39,6 +39,8 @@ def stats_library():
             columns_per_segment=2,
         ),
     )
+
+    enable_polars_writes(lib)
 
     try:
         # Each test writes the data needed for its own assertions

@@ -135,3 +135,13 @@ def query_stats_operation_count(stats, operation, key_type):
         .get(key_type, {})
         .get("count", 0)
     )
+
+
+def enable_polars_writes(lib: Library) -> None:
+    """Enable experimental Polars writes in older ArcticDB builds."""
+    # GitHub CI uses public ArcticDB builds that may need this switch.
+    # Newer builds accept Polars input without it
+    enable = getattr(lib._nvs, "_set_allow_arrow_input", None)
+
+    if enable is not None:
+        enable(True)

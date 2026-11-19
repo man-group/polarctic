@@ -24,6 +24,7 @@ from arcticdb import Arctic, LibraryOptions, OutputFormat
 from arcticdb.version_store.library import Library
 
 from polarctic.polarctic import PolarsToArcticDBTranslator
+from tests.utils import enable_polars_writes
 
 
 @pytest.fixture
@@ -149,6 +150,8 @@ def arctic_source(tmp_path: Path) -> Iterator[ArcticSource]:
             dynamic_schema=True,
         ),
     )
+
+    enable_polars_writes(lib)
 
     try:
         yield ArcticSource(uri, library_name, lib)
