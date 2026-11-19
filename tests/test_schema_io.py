@@ -38,7 +38,6 @@ def data_segment_layout(lib, symbol, version=None):
     return lib._nvs.read_index(symbol, as_of=version)
 
 
-
 def test_schema_discovery_reads_no_table_data_keys(stats_library, sample_data):
     """Check that planning reads no table-data segments."""
     # Get this test's library
@@ -58,11 +57,6 @@ def test_schema_discovery_reads_no_table_data_keys(stats_library, sample_data):
     assert query_stats_operation_count(planning, "Memory_GetObject", "TABLE_INDEX") == 1
 
 
-@pytest.mark.xfail(
-    reason="Known bug: collection reloads the index obtained during schema discovery",
-    strict=True,
-    raises=AssertionError,
-)
 @pytest.mark.parametrize("hint", [None, 3], ids=["single-read", "batched"])
 def test_collection_reuses_schema_index(stats_library, sample_data, hint):
     """Check index reuse during single-read and batched collection."""

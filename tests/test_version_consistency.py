@@ -18,26 +18,14 @@ import polarctic.polarctic as pc
 from tests.utils import oracle, override_batch_hint
 
 
-# Latest-version scans may read a newer version after schema discovery,
-# causing inconsistencies between the planned schema and collected data.
-#
-# Observed failures:
-# - AssertionError: collected values differ from the initially resolved version.
-# - PanicException: batches have different columns and cannot be joined.
-#
-# Mark only scans requesting "latest" (as_of=None) as expected failures.
-# Scans explicitly requesting version 0 (as_of=0) remain unmarked.
-@pytest.mark.parametrize("as_of", [
-    pytest.param(
-        None, id="latest",
-        marks=pytest.mark.xfail(
-            reason="Known version bug: latest scan changes version after schema discovery",
-            strict=True,
-            raises=(AssertionError, pl.exceptions.PanicException),
-        ),
-    ),
-    pytest.param(0, id="version-zero"),
-])
+# Check both latest-version resolution and an explicit version
+@pytest.mark.parametrize(
+    "as_of",
+    [
+        pytest.param(None, id="latest"),
+        pytest.param(0, id="version-zero"),
+    ],
+)
 
 # Run each case with the new write happening at one of two points:
 # - after the original schema has been discovered;
