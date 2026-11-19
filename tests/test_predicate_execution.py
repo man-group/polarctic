@@ -19,6 +19,8 @@ from polars.testing import assert_frame_equal
 import polarctic.polarctic as pc
 from tests.utils import observe_reads, oracle, override_batch_hint
 
+from arcticdb.exceptions import UserInputException
+
 
 # Known failure groups:
 # - INCORRECT_FILTER: arithmetic, column-dependent or quoted-string filters return incorrect rows.
@@ -36,7 +38,7 @@ INCORRECT_FILTER = pytest.mark.xfail(
 INTEGER_BITWISE = pytest.mark.xfail(
     reason="Known bug: ArcticDB rejects the translated integer bitwise query",
     strict=True,
-    raises=pl.exceptions.ComputeError,
+    raises=(pl.exceptions.ComputeError, UserInputException),
 )
 
 MISSING_FALLBACK = pytest.mark.xfail(

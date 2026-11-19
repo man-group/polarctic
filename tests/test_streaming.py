@@ -15,7 +15,7 @@ from arcticdb import Arctic, LibraryOptions, OutputFormat, QueryBuilder
 from polars.testing import assert_frame_equal
 
 import polarctic.polarctic as pc
-from tests.utils import backend_frame, observe_reads, oracle, override_batch_hint
+from tests.utils import backend_frame, enable_polars_writes, observe_reads, oracle, override_batch_hint
 
 
 # These cases reproduce the early termination bug after filtered reads.
@@ -310,6 +310,8 @@ def test_public_scan_reaches_late_matches_with_engine_hint(tmp_path, engine):
     # Create separate storage because this test needs a larger dataset and a different stored-segment size
     ac = Arctic(f"lmdb://{tmp_path / 'large_store'}", output_format=OutputFormat.POLARS)
     lib = ac.create_library("large", library_options=LibraryOptions(rows_per_segment=10_000))
+    enable_polars_writes(lib)
+    
     try:
         data = pl.DataFrame({"a": pl.Series(range(100_005), dtype=pl.Int64)})
         lib.write("data", data)

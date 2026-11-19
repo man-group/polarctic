@@ -16,7 +16,7 @@ from arcticdb import OutputFormat, Arctic
 from polars.testing import assert_frame_equal
 
 import polarctic.polarctic as pc
-from tests.utils import observe_reads, oracle, override_batch_hint
+from tests.utils import enable_polars_writes, observe_reads, oracle, override_batch_hint
 
 def test_scan_returns_lazy_frame_and_complete_schema(arctic_source, sample_data):
     """Check that the Library scan form returns a lazy plan with the expected schema."""
@@ -154,6 +154,7 @@ def test_uri_reads_real_store(tmp_path):
     uri = f"lmdb://{tmp_path / 'uri_store'}"
     ac = Arctic(uri)
     lib = ac.create_library("uri_tests")
+    enable_polars_writes(lib)
 
     expected = pl.DataFrame({"a": [0, 1, 2], "b": [10.0, 11.0, 12.0]})
     lib.write("data", expected)
