@@ -7,48 +7,45 @@ As of the Change Date specified in that file, in accordance with the Business So
 License, use of this software will be governed by the Apache License, version 2.0.
 """
 
-"""Verify planning, index reuse and column-selection IO using S3 query statistics."""
+"""Check planning, index reuse and column reads using memory storage."""
 
 import datetime as dt
-import os
-import uuid
 
 import pandas as pd
 import polars as pl
 import pytest
-from ahl.mongo import NativeMongoose
-from arcticdb import OutputFormat
+from arcticdb import Arctic, LibraryOptions, OutputFormat
 from arcticdb_ext.storage import KeyType
 from polars.testing import assert_frame_equal
 
 import polarctic.polarctic as pc
-from tests.utils import backend_frame, collect_storage_stats, observe_reads, oracle, override_batch_hint, storage_read_count
+from tests.utils import collect_storage_stats, observe_reads, oracle, override_batch_hint, query_stats_operation_count
 
 
 @pytest.fixture
 def stats_library():
-    """Use a unique test symbol in an existing managed test library."""
-    # Keep remote tests opt-in so ordinary test runs do not access research storage
-    library_name = os.environ.get("POLARCTIC_TEST_LIBRARY")
-    if not library_name:
-        pytest.skip(
-            "Set POLARCTIC_TEST_LIBRARY to an approved managed test library"
-        )
+    """Create an empty, isolated in-memory library for each test."""
+    # Public ArcticDB storage 
+    ac = Arctic("mem://", output_format=OutputFormat.POLARS)
 
-    # Open the library through NativeMongoose
-    nm = NativeMongoose("research", api="v2")
-    lib = nm[library_name]
+    # Each fixture has its own store, so fixed names are sufficient
+    library_name = "stats_tests"
+    symbol = "data"
 
-    # Each test gets a different symbol, avoiding clashes between test runs
-    symbol = "polarctic_stats_" + uuid.uuid4().hex
+    lib = ac.create_library(
+        library_name,
+        library_options=LibraryOptions(
+            rows_per_segment=3,
+            columns_per_segment=2,
+        ),
+    )
 
     try:
-        # Give the test both the library and its unique symbol name
+        # Each test writes the data needed for its own assertions
         yield lib, symbol
     finally:
-        # Delete only this test's symbol, including all its versions
-        if lib.has_symbol(symbol):
-            lib.delete(symbol)
+        # Delete only the library created by this fixture
+        ac.delete_library(library_name)
 
 
 def assert_data_reads_are_recorded(lib, symbol, version=0):
@@ -62,7 +59,7 @@ def assert_data_reads_are_recorded(lib, symbol, version=0):
         )
 
     # Zero counts cannot prove anything if recording is not working
-    if storage_read_count(stats, "TABLE_DATA") <= 0:
+    if query_stats_operation_count(stats, "Memory_GetObject", "TABLE_DATA") <= 0:
         raise RuntimeError(
             "The tracker recorded no TABLE_DATA reads; "
             "check storage access and query-statistics support"
@@ -87,8 +84,8 @@ def data_segment_layout(lib, symbol, version):
 
 
 def test_schema_discovery_reads_no_table_data_keys(stats_library, sample_data):
-    """Check that planning fetches no table-data segments from S3."""
-    # Get the managed library and this test's unique symbol
+    """Check that planning reads no table-data segments."""
+    # Get this test's library and symbol
     lib, symbol = stats_library
     lib.write(symbol, sample_data)
 
@@ -101,11 +98,11 @@ def test_schema_discovery_reads_no_table_data_keys(stats_library, sample_data):
         assert query.collect_schema() == pl.Schema({"a": pl.Int64})
 
     # Planning should not fetch the stored table-data segments
-    assert storage_read_count(planning, "TABLE_DATA") == 0
+    assert query_stats_operation_count(planning, "Memory_GetObject", "TABLE_DATA") == 0
 
     # Fetching the index during planning is expected in this setup.
     # A positive count also confirms that this phase recorded index IO
-    assert storage_read_count(planning, "TABLE_INDEX") > 0
+    assert query_stats_operation_count(planning, "Memory_GetObject", "TABLE_INDEX") > 0
 
 
 @pytest.mark.xfail(
@@ -116,7 +113,7 @@ def test_schema_discovery_reads_no_table_data_keys(stats_library, sample_data):
 @pytest.mark.parametrize("hint", [None, 3], ids=["single-read", "batched"])
 def test_collection_reuses_schema_index(stats_library, sample_data, hint):
     """Check index reuse during single-read and batched collection."""
-    # Get the managed library and this test's unique symbol
+    # Get this test's library and symbol
     lib, symbol = stats_library
     lib.write(symbol, sample_data)
     assert_data_reads_are_recorded(lib, symbol)
@@ -142,13 +139,13 @@ def test_collection_reuses_schema_index(stats_library, sample_data, hint):
         assert len(batches) >= 2
 
     # Planning should have loaded the index in this configured setup
-    assert storage_read_count(planning, "TABLE_INDEX") > 0
+    assert query_stats_operation_count(planning, "Memory_GetObject", "TABLE_INDEX") > 0
 
     # Collection should have read actual table data
-    assert storage_read_count(collection, "TABLE_DATA") > 0
+    assert query_stats_operation_count(collection, "Memory_GetObject", "TABLE_DATA") > 0
 
     # The index obtained during planning should be reused during collection
-    assert storage_read_count(collection, "TABLE_INDEX") == 0
+    assert query_stats_operation_count(collection, "Memory_GetObject", "TABLE_INDEX") == 0
 
 
 # Small batch hints currently cause extra fetches of stored table data
@@ -160,7 +157,7 @@ def test_collection_reuses_schema_index(stats_library, sample_data, hint):
 @pytest.mark.parametrize("hint", [1, 2, 3, 4])
 def test_small_hints_do_not_repeat_table_data_fetches(stats_library, hint):
     """Check that small batch hints do not cause unnecessary data fetches."""
-    # Get the managed library and this test's unique symbol
+    # Get this test's library and symbol
     lib, symbol = stats_library
 
     # Use only one column so column selection does not affect this test.
@@ -195,7 +192,7 @@ def test_small_hints_do_not_repeat_table_data_fetches(stats_library, hint):
     assert_frame_equal(baseline, expected)
 
     # Get the number of recorded table-data fetches
-    baseline_count = storage_read_count(baseline_stats, "TABLE_DATA")
+    baseline_count = query_stats_operation_count(baseline_stats, "Memory_GetObject", "TABLE_DATA")
 
     # A full read is expected to have one fetch per required data segment.
     # Check that the counters actually behave that way
@@ -221,7 +218,7 @@ def test_small_hints_do_not_repeat_table_data_fetches(stats_library, hint):
     assert_frame_equal(actual, expected)
 
     # Get the data-fetch count for the Polarctic scan
-    scan_count = storage_read_count(scan_stats, "TABLE_DATA")
+    scan_count = query_stats_operation_count(scan_stats, "Memory_GetObject", "TABLE_DATA")
 
     # The complete scan needs the same stored segments as the reference read.
     # Its small output hint should not cause extra segment fetches
@@ -230,33 +227,21 @@ def test_small_hints_do_not_repeat_table_data_fetches(stats_library, hint):
     )
 
 
-def test_projection_reduces_table_data_reads(stats_library):
+def test_projection_reduces_table_data_reads(stats_library, sample_data):
     """Check that selecting one column fetches fewer data segments."""
-    # Get the managed library and this test's unique symbol
+    # Get this test's library and symbol
     lib, symbol = stats_library
 
-    # Create a small wide table to produce separate column segments
-    data = pl.DataFrame(
-        {
-            f"col_{column}": [
-                column * 10 + row
-                for row in range(8)
-            ]
-            for column in range(256)
-        }
-    )
+    data = sample_data
     lib.write(symbol, data)
 
     # Check the actual layout
     layout = data_segment_layout(lib, symbol, 0)
     column_ranges = layout[["start_col", "end_col"]].drop_duplicates()
 
-    # Selecting columns cannot avoid separate column-segment fetches if the backend stored all columns together
+    # Fail if the fixture did not create separate column segments
     if len(column_ranges) < 2:
-        pytest.skip(
-            "This library stores the test columns together; "
-            "projection fetch savings require separate column segments"
-        )
+        raise RuntimeError("The fixture did not create separate column segments")
 
     # Confirm that the storage counters record real data reads
     assert_data_reads_are_recorded(lib, symbol)
@@ -264,7 +249,7 @@ def test_projection_reduces_table_data_reads(stats_library):
     # Compare a full read with a one-column read of the same version, holding the version and batch hint fixed
     with override_batch_hint(None):
         full_query = pc.scan_arcticdb(lib, symbol, as_of=0)
-        narrow_query = pc.scan_arcticdb(lib, symbol, as_of=0).select("col_0")
+        narrow_query = pc.scan_arcticdb(lib, symbol, as_of=0).select("a")
 
         # Resolve schemas before measuring collection
         full_query.collect_schema()
@@ -278,11 +263,11 @@ def test_projection_reduces_table_data_reads(stats_library):
 
     # First verify that both queries return the correct data
     assert_frame_equal(full, data)
-    assert_frame_equal(narrow, data.select("col_0"))
+    assert_frame_equal(narrow, data.select("a"))
 
     # Read the number of recorded table-data fetches for each query
-    full_count = storage_read_count(full_stats, "TABLE_DATA")
-    narrow_count = storage_read_count(narrow_stats, "TABLE_DATA")
+    full_count = query_stats_operation_count(full_stats, "Memory_GetObject", "TABLE_DATA")
+    narrow_count = query_stats_operation_count(narrow_stats, "Memory_GetObject", "TABLE_DATA")
 
     # The one-column query should fetch fewer data segments
     assert 0 < narrow_count < full_count, (
@@ -299,7 +284,7 @@ def test_projection_reduces_table_data_reads(stats_library):
 )
 def test_timeseries_index_filter_returns_correct_rows_and_skips_slices(stats_library):
     """Check correct time filtering and avoidance of out-of-range data fetches."""
-    # Get the managed library and this test's unique symbol
+    # Get this test's library and symbol
     lib, symbol = stats_library
 
     # Create one row per day, from January 1 through January 12.
@@ -368,7 +353,7 @@ def test_timeseries_index_filter_returns_correct_rows_and_skips_slices(stats_lib
     assert_frame_equal(full, data)
 
     # One fetch per data segment is expected
-    assert storage_read_count(full_stats, "TABLE_DATA") == len(layout)
+    assert query_stats_operation_count(full_stats, "Memory_GetObject", "TABLE_DATA") == len(layout)
 
     # Disable batching to focus on time filtering and storage skipping
     with override_batch_hint(None):
@@ -379,7 +364,7 @@ def test_timeseries_index_filter_returns_correct_rows_and_skips_slices(stats_lib
 
         # Record the read requests and tables returned by ArcticDB
         with observe_reads() as reads:
-            # Also record the S3 operations made during collection
+            # Record memory-storage reads during collection
             with collect_storage_stats() as filtered_stats:
                 actual = query.collect()
 
@@ -394,14 +379,14 @@ def test_timeseries_index_filter_returns_correct_rows_and_skips_slices(stats_lib
     assert_frame_equal(actual, expected)
 
     # Check storage work separately: only the overlapping data segments should need to be fetched
-    assert storage_read_count(
-        filtered_stats, "TABLE_DATA"
+    assert query_stats_operation_count(
+        filtered_stats, "Memory_GetObject", "TABLE_DATA"
     ) == required_segments
 
 
 def test_stats_enabled_does_not_change_results(stats_library, sample_data):
     """Check that collecting statistics does not change the query result."""
-    # Get the managed library and this test's unique symbol
+    # Get this test's library and symbol
     lib, symbol = stats_library
     lib.write(symbol, sample_data)
     assert_data_reads_are_recorded(lib, symbol)
@@ -427,4 +412,4 @@ def test_stats_enabled_does_not_change_results(stats_library, sample_data):
     assert_frame_equal(with_stats, expected)
 
     # Confirm that the measured execution actually recorded table-data reads
-    assert storage_read_count(stats, "TABLE_DATA") > 0
+    assert query_stats_operation_count(stats, "Memory_GetObject", "TABLE_DATA") > 0

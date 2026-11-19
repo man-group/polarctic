@@ -16,6 +16,7 @@ from typing import Any
 import polars as pl
 import pytest
 from arcticdb.version_store.library import Library
+import arcticdb.toolbox.query_stats as qs
 
 
 @dataclass
@@ -33,8 +34,15 @@ def observe_reads() -> Iterator[list[ObservedRead]]:
     original = Library.read
 
     def observe(self: Library, *args: Any, **kwargs: Any) -> Any:
-        # Copy arguments before ArcticDB can modify the query builder
-        recorded = copy.deepcopy(kwargs)
+        # Copy the arguments, but keep the original index object.
+        # ArcticDB's preloaded index cannot be deep-copied
+        recorded = copy.deepcopy(
+            {name: value for name, value in kwargs.items() if name != "as_of"}
+        )
+
+        if "as_of" in kwargs:
+            recorded["as_of"] = kwargs["as_of"]
+
         result = original(self, *args, **kwargs)
 
         # Lazy calls prepare a read; they do not return the table yet
@@ -96,60 +104,34 @@ def backend_frame(reads: list[ObservedRead]) -> pl.DataFrame:
 
 
 @contextmanager
-def collect_storage_stats():
-    """Collect fresh standard and enterprise stats inside the block."""
-    from arcticdb.toolbox import query_stats as qs
-    from arcticdb_ext.tools import query_stats as core_qs
-    from arcticdb_enterprise_ext import query_stats as enterprise_qs
+def collect_storage_stats() -> Iterator[dict[str, Any]]:
+    """Collect fresh ArcticDB query statistics."""
+    result: dict[str, Any] = {}
 
-    # Use both existing trackers and their result functions
-    trackers = [
-        ("core", qs, qs.get_query_stats),
-        ("enterprise", enterprise_qs, enterprise_qs.get_stats),
-    ]
+    # Enable recording
+    with qs.query_stats():
+        qs.reset_stats()
 
-    # Do not reset or disable another collector's measurements
-    if core_qs.is_enabled() or enterprise_qs.is_enabled():
-        raise RuntimeError("Another query-stats collector is already enabled")
+        try:
+            # Run the code being measured
+            yield result
+        finally:
+            try:
+                # Save the counts, even if the code fails
+                result.update(qs.get_query_stats())
+            finally:
+                # Clear the counts for the next test
+                qs.reset_stats()
 
-    result = {}
-    enabled = []
-
-    try:
-        # Clear old measurements and start recording
-        for _, tracker, _ in trackers:
-            tracker.reset_stats()
-            tracker.enable()
-            enabled.append(tracker)
-
-        yield result
-
-    finally:
-        # Stop recording, including when the block raises an error
-        for tracker in reversed(enabled):
-            tracker.disable()
-
-        # Keep the two trackers' results separate
-        for name, _, getter in trackers:
-            result[name] = getter()
+    # Recording stops automatically when the context ends
 
 
-def storage_read_count(stats, key_type):
-    """Add the S3 read counts for a key type from both trackers."""
-    total = 0
-
-    for snapshot in stats.values():
-        # Find S3 read measurements in this tracker's results
-        operations = snapshot.get("storage_operations", {})
-        reads = operations.get("S3_GetObject", {})
-
-        # We need counts grouped by key type, not one overall count
-        if "count" in reads:
-            raise AssertionError(
-                "This query-stats version lacks per-key-type S3 counters"
-            )
-
-        # Missing entries contribute zero
-        total += reads.get(key_type, {}).get("count", 0)
-
-    return total
+def query_stats_operation_count(stats, operation, key_type):
+    """Return the count for one operation and key type."""
+    # Return zero if no count was recorded
+    return (
+        stats.get("storage_operations", {})
+        .get(operation, {})
+        .get(key_type, {})
+        .get("count", 0)
+    )

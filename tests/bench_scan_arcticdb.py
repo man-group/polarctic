@@ -7,63 +7,51 @@ As of the Change Date specified in that file, in accordance with the Business So
 this software will be governed by the Apache License, version 2.0.
 """
 
-"""Compare ArcticDB filtering/column selection through Polarctic with full ArcticDB S3 reads followed by filtering/column selection in Polars."""
+"""Compare Polarctic pushdown with a full ArcticDB read followed by Polars filtering."""
 
 import datetime as dt
-import uuid
 from contextlib import nullcontext
 
 import polars as pl
 import pytest
-from ahl.mongo import NativeMongoose
-from arcticdb import OutputFormat
+from arcticdb import Arctic, LibraryOptions, OutputFormat
 from polars.testing import assert_frame_equal
 
 import polarctic.polarctic as pc
-from tests.utils import collect_storage_stats, storage_read_count
+from tests.utils import collect_storage_stats
 
 
 @pytest.fixture
-def benchmark_data():
-    """Create and clean up one temporary symbol in the managed test library."""
-    # Open the managed library using my skibidi write permissions
-    nm = NativeMongoose("research", api="v2")
-    lib = nm["xodintsova.polarctic"]
-
-    # Use a unique symbol so separate benchmark cases do not overwrite each other
-    symbol = "benchmark_" + uuid.uuid4().hex
-    written = False
-
+def benchmark_data(tmp_path):
+    """Store one fixed version with several timeseries segments."""
+    # Each benchmark case gets its own temporary local store
+    uri = f"lmdb://{tmp_path / 'benchmark_store'}"
+    ac = Arctic(uri, output_format=OutputFormat.POLARS)
+    name = "benchmark"
+    symbol = "data"
+    lib = ac.create_library(
+        name,
+        library_options=LibraryOptions(rows_per_segment=10_000),
+    )
+    start = dt.datetime(2020, 1, 1)
+    data = pl.DataFrame({
+        "timestamp": pl.datetime_range(
+            start,
+            start + dt.timedelta(seconds=99_999),
+            interval="1s",
+            time_unit="ns",
+            eager=True,
+        ),
+        "a": pl.Series(range(100_000), dtype=pl.Int64),
+        "b": pl.Series(range(100_000), dtype=pl.Float64),
+    })
     try:
-        # Create one row per second, starting at midnight on January 1
-        start = dt.datetime(2020, 1, 1)
-
-        # timestamp is first so index_column=True makes it the timeseries index;
-        # a is used for filtering; b is omitted from the query output
-        data = pl.DataFrame(
-            {
-                "timestamp": pl.datetime_range(
-                    start,
-                    start + dt.timedelta(seconds=99_999),
-                    interval="1s",
-                    time_unit="ns",
-                    eager=True,
-                ),
-                "a": pl.Series(range(100_000), dtype=pl.Int64),
-                "b": pl.Series(range(100_000), dtype=pl.Float64),
-            }
-        )
-
-        # Write the table directly from Polars, creating version 0
+        # Use the first column as its datetime index
         lib.write(symbol, data, index_column=True)
-        written = True
-
         yield lib, data, symbol
-
     finally:
-        # Clean up even if validation or benchmarking fails (delete only the temporary symbol)
-        if written:
-            lib.delete(symbol)
+        ac.delete_library(name)
+
 
 
 # Compare a numeric filter and a filter on the stored datetime index
@@ -73,8 +61,8 @@ def benchmark_data():
 def bench_scan_comparison(
     benchmark, benchmark_data, query_name, implementation, stats_enabled
 ):
-    """Measure equivalent queries through Polarctic and direct-read workflows."""
-    # Get the managed library, original input table and unique symbol name
+    """Time the two workflows, with and without query-statistics recording."""
+    # Get the local library, input data and symbol
     lib, data, symbol = benchmark_data
 
     if query_name == "value-filter":
@@ -84,14 +72,14 @@ def bench_scan_comparison(
         # Select the same rows by timestamp, 90,000 seconds after the start
         predicate = pl.col("timestamp") >= dt.datetime(2020, 1, 2, 1)
 
+    # Apply the same filter and column selection in both workflows
     def apply(frame):
-        # Apply the same filter and column selection in both workflows
         return frame.filter(predicate).select("timestamp", "a")
 
     expected = apply(data.lazy()).collect(engine="in-memory")
 
-    # Prepare a Polarctic query for the fixed stored version before timing starts.
-    # Repeated collections below reuse this prepared plan
+    # Prepare a reusable Polarctic plan for the fixed stored version before timing starts.
+    # These measurements cover warm/repeated collection, not cold storage
     query = apply(pc.scan_arcticdb(lib, symbol, as_of=0))
 
     def pushed():
@@ -102,58 +90,33 @@ def bench_scan_comparison(
     def baseline():
         # Read the complete stored version from ArcticDB without backend filtering
         # or column selection, then apply both operations in Polars
-        frame = lib.read(
-            symbol,
-            as_of=0,
-            output_format=OutputFormat.POLARS,
-        ).data
+        frame = lib.read(symbol, as_of=0, output_format=OutputFormat.POLARS).data
         return apply(frame.lazy()).collect(engine="in-memory")
 
     # Verify both workflows before measuring either of them
     assert_frame_equal(pushed(), expected)
     assert_frame_equal(baseline(), expected)
-
     run = pushed if implementation == "polarctic" else baseline
 
     if stats_enabled:
-        # Confirm that the managed storage reports S3 table-data reads
-        with collect_storage_stats() as control:
-            lib.read(
-                symbol,
-                as_of=0,
-                output_format=OutputFormat.POLARS,
-            )
-
-        if storage_read_count(control, "TABLE_DATA") <= 0:
-            raise RuntimeError(
-                "S3 data reads were not recorded by query statistics"
-            )
-
-        # Record one execution separately to inspect its storage statistics
-        # outside the timed measurement
+        # Record one separate, untimed execution for inspection.
+        # Preserve the plain ArcticDB snapshot as benchmark metadata.
         with collect_storage_stats() as sample_stats:
             sample = run()
-
         assert_frame_equal(sample, expected)
         benchmark.extra_info["sample_query_stats"] = sample_stats
 
-    # For stats-on cases, record operations during the timed work.
-    # Collector setup and snapshot retrieval happen outside the timed callable.
-    # For stats-off cases, nullcontext does nothing
+    # Enable recording once around the entire timing run.
+    # Collector setup and snapshot retrieval are outside the timed callable.
+    # The timed work includes recording overhead when enabled
     scope = collect_storage_stats() if stats_enabled else nullcontext()
     with scope:
-        # pytest-benchmark repeatedly calls the chosen workflow and measures
-        # how long each execution takes
         benchmark(run)
 
     benchmark.extra_info["dataset_rows"] = data.height
     benchmark.extra_info["arcticdb_version_requested"] = 0
-    benchmark.extra_info["query"] = query_name
-    benchmark.extra_info["implementation"] = implementation
-    benchmark.extra_info["query_stats_enabled"] = stats_enabled
-    benchmark.extra_info["storage"] = "managed S3-compatible library"
-    benchmark.extra_info["library"] = "xodintsova.polarctic"
+    benchmark.extra_info["measurement"] = "warm repeated execution, in-memory engine"
+    benchmark.extra_info["storage"] = "LMDB"
 
-    # The earlier validation reads may have warmed caches, so these results
-    # measure repeated execution, not cold-storage reads
-    benchmark.extra_info["measurement"] = ("warm repeated execution, in-memory engine")
+    # LMDB reads may not appear in query statistics.
+    # Use the memory-backed unit tests to check data-segment read counts
