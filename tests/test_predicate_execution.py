@@ -20,29 +20,10 @@ import polarctic.polarctic as pc
 from tests.utils import observe_reads, oracle, override_batch_hint
 
 
-# Known failure groups:
-# - INCORRECT_FILTER: arithmetic, column-dependent or quoted-string filters return incorrect rows.
-# - INTEGER_BITWISE: ArcticDB rejects the translated integer AND/OR/XOR queries.
-# - MISSING_FALLBACK: unsupported filters are lost instead of being applied in Polars.
-# - LITERAL_OPTION: literal=True is ignored, so literal text is treated as a regex.
-
-
-INCORRECT_FILTER = pytest.mark.xfail(
-    reason="Known bug: the filter is ignored or produces incorrect rows",
-    strict=True,
-    raises=AssertionError,
-)
-
 INTEGER_BITWISE = pytest.mark.xfail(
     reason="Known bug: ArcticDB rejects the translated integer bitwise query",
     strict=True,
     raises=pl.exceptions.ComputeError,
-)
-
-MISSING_FALLBACK = pytest.mark.xfail(
-    reason="Known bug: unsupported predicates are not applied locally",
-    strict=True,
-    raises=AssertionError,
 )
 
 LITERAL_OPTION = pytest.mark.xfail(
@@ -61,10 +42,10 @@ PREDICATE_CASES = [
     pytest.param(pl.col("a") <= 2, id="le"),
     pytest.param(pl.col("a") == 2, id="eq"),
     pytest.param(pl.col("a") != 2, id="ne"),
-    pytest.param(pl.col("a") > (pl.col("b") - 12), id="column-gt", marks=INCORRECT_FILTER),
-    pytest.param(pl.col("a") == (pl.col("b") - 10), id="column-eq", marks=INCORRECT_FILTER),
-    pytest.param((pl.col("a") + pl.col("b")) > 14, id="add", marks=INCORRECT_FILTER),
-    pytest.param((pl.col("b") - pl.col("a")) == 10, id="subtract", marks=INCORRECT_FILTER),
+    pytest.param(pl.col("a") > (pl.col("b") - 12), id="column-gt"),
+    pytest.param(pl.col("a") == (pl.col("b") - 10), id="column-eq"),
+    pytest.param((pl.col("a") + pl.col("b")) > 14, id="add"),
+    pytest.param((pl.col("b") - pl.col("a")) == 10, id="subtract"),
     pytest.param((pl.col("a") * 2) > 5, id="multiply"),
     pytest.param((pl.col("b") / 2) > 6, id="divide"),
     pytest.param((-pl.col("a")) < -2, id="negate"),
@@ -77,7 +58,7 @@ PREDICATE_CASES = [
     pytest.param((pl.col("a") ^ 1) == 3, id="bitwise-xor", marks=INTEGER_BITWISE),
     pytest.param(pl.col("a").is_in([1, 4]), id="membership"),
     pytest.param(pl.col("text").str.contains("alpha|beta"), id="regex"),
-    pytest.param(pl.col("text") == 'a"b', id="quoted-literal", marks=INCORRECT_FILTER),
+    pytest.param(pl.col("text") == 'a"b', id="quoted-literal"),
     pytest.param(pl.col("text") == "[x]", id="bracket-literal"),
 ]
 
@@ -120,14 +101,8 @@ REQUIRED_NATIVE_PREDICATES = [
     pytest.param(pl.col("a") <= 2, id="le"),
     pytest.param(pl.col("a") == 2, id="eq"),
     pytest.param(pl.col("a") != 2, id="ne"),
-    pytest.param(
-        (pl.col("a") > 1) & (pl.col("b") < 15),
-        id="and",
-    ),
-    pytest.param(
-        (pl.col("a") < 1) | (pl.col("a") > 4),
-        id="or",
-    ),
+    pytest.param((pl.col("a") > 1) & (pl.col("b") < 15), id="and"),
+    pytest.param((pl.col("a") < 1) | (pl.col("a") > 4), id="or"),
 ]
 
 @pytest.mark.parametrize("predicate", REQUIRED_NATIVE_PREDICATES)
@@ -171,7 +146,6 @@ def test_required_native_predicate_is_executed_by_arcticdb(arctic_source, sample
     assert_frame_equal(actual, expected)
 
 
-@MISSING_FALLBACK
 @pytest.mark.parametrize("failure_type", [NotImplementedError, ValueError])
 def test_translation_failure_still_filters_rows(arctic_source, sample_data, monkeypatch, failure_type):
     """Check that translation failures still produce correctly filtered data through local fallback."""
@@ -220,11 +194,11 @@ def test_translation_failure_still_filters_rows(arctic_source, sample_data, monk
 @pytest.mark.parametrize(
     "condition", 
     [
-        pytest.param("modulo", marks=MISSING_FALLBACK),
-        pytest.param("and", marks=MISSING_FALLBACK),
-        pytest.param("or", marks=MISSING_FALLBACK),
+        pytest.param("modulo"),
+        pytest.param("and"),
+        pytest.param("or"),
         pytest.param("literal-option", marks=LITERAL_OPTION),
-        pytest.param("date-method", marks=MISSING_FALLBACK),
+        pytest.param("date-method"),
     ],
 )
 def test_complex_predicates_preserve_all_conditions(arctic_source, sample_data, monkeypatch, condition):
@@ -294,8 +268,8 @@ def test_complex_predicates_preserve_all_conditions(arctic_source, sample_data, 
 @pytest.mark.parametrize(
     "operation", 
     [
-        pytest.param("filter_select", marks=MISSING_FALLBACK),
-        pytest.param("filter_head", marks=MISSING_FALLBACK),
+        pytest.param("filter_select"),
+        pytest.param("filter_head"),
         "head_filter",
         "calculate_filter",
     ],
@@ -359,8 +333,7 @@ def test_fallback_preserves_dependencies_and_operation_order(arctic_source, samp
     assert_frame_equal(actual, expected)
 
 
-# Modulo is unsupported by the translator, so the connector currently loses this combined filter instead of applying it in Polars
-@MISSING_FALLBACK
+# Modulo is unsupported by the translator, so the connector must filter the rows in Polars
 def test_time_range_and_unsupported_filter_return_correct_rows(arctic_source, sample_data):
     """Check that a time condition and numeric conditions remain effective."""
     lib = arctic_source.library
