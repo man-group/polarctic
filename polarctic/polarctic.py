@@ -12,7 +12,7 @@ import datetime as dt
 import re
 from collections.abc import Callable, Iterator
 from functools import lru_cache
-from typing import Any, cast, overload
+from typing import Any, NamedTuple, cast, overload
 
 import numpy as np
 import polars as pl
@@ -277,21 +277,30 @@ def _get_library_from_uri(uri: str, lib_name: str) -> Library:
     return Arctic(uri).get_library(lib_name)
 
 
+class PushdownFilter(NamedTuple):
+    """The backend query and whether local filtering is needed."""
+
+    query_builder: QueryBuilder | None
+    fallback_to_polars: bool
+
+
 def _translate_predicate(
     predicate: pl.Expr | None,
     query_builder: QueryBuilder | None = None,
-) -> tuple[QueryBuilder | None, bool]:
-    """Return the query builder and whether ArcticDB applies the whole predicate."""
-    # No filter: nothing to translate
+) -> PushdownFilter:
+    """Translate the filter to ArcticDB or request local Polars filtering."""
     if predicate is None:
-        return query_builder, True
+        # No filter to apply
+        return PushdownFilter(query_builder, fallback_to_polars=False)
+    
     try:
         # Turn the Polars filter into an ArcticDB filter
         translated = _TRANSLATOR.translate(predicate, query_builder or QueryBuilder())
-        return cast(QueryBuilder, translated), True
+        return PushdownFilter(cast(QueryBuilder, translated), fallback_to_polars=False)
+    
     except (NotImplementedError, ValueError):
-        # ArcticDB cannot apply it: the caller must filter in Polars
-        return query_builder, False
+        # Keep the existing backend query and apply this filter locally
+        return PushdownFilter(query_builder, fallback_to_polars=True)
 
 
 def _iter_read_request_batches(
@@ -299,6 +308,8 @@ def _iter_read_request_batches(
     read_request: ReadRequest,
     n_rows: int | None,
     batch_size: int | None,
+    *,
+    fallback_predicate: pl.Expr | None = None,
 ) -> Iterator[pl.DataFrame]:
     # Fast path: Polars passes batch_size=None for a plain .collect() (no streaming).
     # Execute a single lib.read() round-trip instead of looping with row_range slices.
@@ -313,6 +324,12 @@ def _iter_read_request_batches(
                 end = min(end, rr.row_range[1])
             rr = rr._replace(row_range=(base_start, end))
         frame = cast(pl.DataFrame, lib.read(**rr._asdict()).data)
+
+        if fallback_predicate is not None:
+            # Apply unsupported filtering before returning the frame
+            frame = frame.filter(fallback_predicate)
+
+        # Do not return an empty batch
         if frame.height > 0:
             yield frame
         return
@@ -349,16 +366,24 @@ def _iter_read_request_batches(
 
         batch_request = read_request._replace(row_range=(batch_start, batch_end))
         frame = cast(pl.DataFrame, lib.read(**batch_request._asdict()).data)
-        rows_read = frame.height
 
+        # Count backend rows before local filtering removes any
+        rows_read = frame.height
         if rows_read == 0:
             break
 
-        yield frame
+        if fallback_predicate is not None:
+            frame = frame.filter(fallback_predicate)
 
+        # An empty filtered batch does not mean the source has ended
+        if frame.height > 0:
+            yield frame
+
+        # Advance past the backend rows, including those filtered out
         read_offset += rows_read
         if remaining_rows is not None:
             remaining_rows -= rows_read
+
         if rows_read < current_batch_size:
             break
 
@@ -401,26 +426,30 @@ def _register_arctic_source(
         if with_columns is not None:
             read_request = read_request._replace(columns=with_columns)
 
-        # Translate the filter into an ArcticDB filter, if possible.
-        # If it can't be translated (e.g. it contains a cast), pushed_down is False
-        # and the filter is applied in Polars below
-        translated_predicate, pushed_down = _translate_predicate(
-            predicate, read_request.query_builder
+        # Translate the filter into an ArcticDB filter, if possible
+        pushdown_filter = _translate_predicate(
+            predicate,
+            read_request.query_builder,
         )
+
         # Only replace the query builder if translation produced a new one
-        if translated_predicate is not read_request.query_builder:
-            read_request = read_request._replace(query_builder=translated_predicate)
+        if pushdown_filter.query_builder is not read_request.query_builder:
+            read_request = read_request._replace(
+                query_builder=pushdown_filter.query_builder,
+            )
 
-        # Read the data from ArcticDB, in one go or in batches
-        batches = _iter_read_request_batches(lib, read_request, n_rows, batch_size)
+        # Pass a local filter only when translation failed
+        fallback_predicate = (
+            predicate if pushdown_filter.fallback_to_polars else None
+        )
 
-        # ArcticDB already applied the filter (or there is none): return batches as they are
-        if pushed_down or predicate is None:
-            # ArcticDB already filtered the rows
-            yield from batches
-        else:
-            # Polars does not filter again after a plugin, so filter each batch here
-            yield from (frame.filter(predicate) for frame in batches)
+        yield from _iter_read_request_batches(
+            lib,
+            read_request,
+            n_rows,
+            batch_size,
+            fallback_predicate=fallback_predicate,
+        )
 
     return pl.io.plugins.register_io_source(  # type: ignore[attr-defined]
         io_source=source_generator,
