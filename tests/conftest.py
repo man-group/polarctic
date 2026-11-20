@@ -7,6 +7,7 @@ As of the Change Date specified in that file, in accordance with the Business So
 License, use of this software will be governed by the Apache License, version 2.0.
 """
 
+import sys
 import gc
 import datetime as dt
 import shutil
@@ -186,3 +187,13 @@ def sample_data() -> pl.DataFrame:
         },
         schema_overrides={"a": pl.Int64, "b": pl.Float64},
     )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def windows_timezone_database():
+    """Provide the timezone files needed by ArcticDB on Windows."""
+    if sys.platform == "win32":
+        from pyarrow.util import download_tzdata_on_windows
+
+        # ArcticDB's native code expects these files on Windows
+        download_tzdata_on_windows()
