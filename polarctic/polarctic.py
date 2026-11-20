@@ -285,8 +285,12 @@ def _translate_predicate(
     base_query_builder = query_builder or QueryBuilder()
     try:
         return cast(QueryBuilder, _TRANSLATOR.translate(predicate, base_query_builder))
-    except (NotImplementedError, ValueError):
-        # Unsupported predicate for ArcticDB pushdown; fall back to Polars-side filtering
+    except (NotImplementedError, ValueError) as error:
+        print(
+            "TRANSLATION FAILED:",
+            type(error).__name__,
+            str(error),
+        )
         return query_builder
 
 
@@ -396,6 +400,14 @@ def _register_arctic_source(
 
         if with_columns is not None:
             read_request = read_request._replace(columns=with_columns)
+
+        print(
+            "CONNECTOR INPUT:",
+            f"columns={with_columns!r}",
+            f"predicate={predicate!r}",
+            f"n_rows={n_rows!r}",
+            f"batch_size={batch_size!r}",
+        )
 
         translated_predicate = _translate_predicate(predicate, read_request.query_builder)
         if translated_predicate is not read_request.query_builder:
