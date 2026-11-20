@@ -7,23 +7,30 @@ As of the Change Date specified in that file, in accordance with the Business So
 License, use of this software will be governed by the Apache License, version 2.0.
 """
 
+import sys
 import gc
+import datetime as dt
 import shutil
 import time
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+import polars as pl
 import pytest
-from arcticdb import Arctic
+from arcticdb import Arctic, LibraryOptions, OutputFormat
+from arcticdb.version_store.library import Library
 
 from polarctic.polarctic import PolarsToArcticDBTranslator
+from tests.utils import enable_polars_writes
 
 
 @pytest.fixture
 def translator() -> PolarsToArcticDBTranslator:
+    """Create a new translator for the test."""
     return PolarsToArcticDBTranslator()
 
 
@@ -119,3 +126,74 @@ def delete_arcticdb(init_arcticdb: dict[str, Any]) -> Iterator[None]:
         except Exception:
             gc.collect()
             time.sleep(0.1)
+
+
+@dataclass
+class ArcticSource:
+    """Database details only; each test chooses its own data."""
+
+    uri: str
+    library_name: str
+    library: Library
+
+
+@pytest.fixture
+def arctic_source(tmp_path: Path) -> Iterator[ArcticSource]:
+    """Create an empty temporary ArcticDB library."""
+    uri = f"lmdb://{tmp_path / 'connector_store'}"
+    ac = Arctic(uri, output_format=OutputFormat.POLARS)
+    library_name = "connector_tests"
+    lib = ac.create_library(
+        library_name,
+        library_options=LibraryOptions(
+            rows_per_segment=3,
+            columns_per_segment=2,
+            dynamic_schema=True,
+        ),
+    )
+
+    enable_polars_writes(lib)
+
+    try:
+        yield ArcticSource(uri, library_name, lib)
+    finally:
+        ac.delete_library(library_name)
+
+
+@pytest.fixture
+def sample_data() -> pl.DataFrame:
+    """Reusable input data, independent of any database."""
+    return pl.DataFrame(
+        {
+            # Keep ts first so a test can choose index_column=True when writing
+            "ts": pl.datetime_range(
+                dt.datetime(2020, 1, 1),
+                dt.datetime(2020, 1, 8),
+                interval="1d",
+                time_unit="ns",
+                eager=True,
+            ),
+            "a": [0, 1, 2, 3, 4, 5, -5, -2],
+            "b": [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 8.0, 9.0],
+            "desk": [
+                "rates", "fx", "rates", "fx",
+                "credit", "credit", "rates", "fx",
+            ],
+            "flag": [True, False, True, False, True, False, True, False],
+            "text": [
+                "alpha", 'a"b', "[x]", "plain",
+                "beta", "x", "negative", "minus",
+            ],
+        },
+        schema_overrides={"a": pl.Int64, "b": pl.Float64},
+    )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def windows_timezone_database():
+    """Provide the timezone files needed by ArcticDB on Windows."""
+    if sys.platform == "win32":
+        from pyarrow.util import download_tzdata_on_windows
+
+        # ArcticDB's native code expects these files on Windows
+        download_tzdata_on_windows()
