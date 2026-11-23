@@ -354,20 +354,8 @@ def test_fallback_preserves_dependencies_and_operation_order(arctic_source, samp
     hint = 3 if engine == "streaming" else None
 
     with override_batch_hint(hint):
-        query = apply(pc.scan_arcticdb(lib, "data", as_of=0))
-
-        print(f"\nCASE: {operation}, engine={engine}")
-        print("UNOPTIMIZED PLAN:")
-        print(query.explain(optimized=False))
-        print("OPTIMIZED PLAN:")
-        print(query.explain(optimized=True))
-
-        actual = query.collect(engine=engine)
-
-    print("EXPECTED:")
-    print(expected)
-    print("ACTUAL:")
-    print(actual)
+        query = pc.scan_arcticdb(lib, "data", as_of=0)
+        actual = apply(query).collect(engine=engine)
 
     # Check that the complete operation sequence returns the correct result
     assert_frame_equal(actual, expected)
