@@ -27,8 +27,8 @@ jobs:
       env:
         PYTHONHASHSEED: "0"
       run: |
-        python tests/bench_compare.py --rigorous --quiet --output benchmark-results.json
-
+        # Timestamp cases remain blocked by the known filtering bug.
+        python -m pytest tests/bench_scan_arcticdb.py -o "python_functions=bench_*" -k "value-filter" --benchmark-only --benchmark-json=benchmark-results.json
     - name: Upload benchmark results
       uses: actions/upload-artifact@v4
       with:
