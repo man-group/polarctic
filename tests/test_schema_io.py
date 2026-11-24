@@ -144,12 +144,6 @@ def test_collection_reuses_schema_index(stats_library, sample_data, hint):
     assert query_stats_operation_count(collection, "Memory_GetObject", "TABLE_INDEX") == 0
 
 
-# Small batch hints currently cause extra fetches of stored table data
-@pytest.mark.xfail(
-    reason="Known bug: small batch hints cause repeated table-data fetches",
-    strict=True,
-    raises=AssertionError,
-)
 @pytest.mark.parametrize("hint", [1, 2, 3, 4])
 def test_small_hints_do_not_repeat_table_data_fetches(stats_library, hint):
     """Check that small batch hints do not cause unnecessary data fetches."""
@@ -455,7 +449,7 @@ def test_querybuilder_date_range_skips_slices(stats_library):
             result = lib.read(
                 symbol, as_of=version, output_format=OutputFormat.POLARS, **read_kwargs
             ).data
-        return result, storage_read_count(stats, "TABLE_DATA")
+        return result, query_stats_operation_count(stats, "Memory_GetObject", "TABLE_DATA")
 
     # 1. Full read: shows that the counters work (expect one fetch per slice)
     full, full_count = count_reads()
