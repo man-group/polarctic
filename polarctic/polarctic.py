@@ -8,6 +8,7 @@ this software will be governed by the Apache License, version 2.0.
 """
 
 import ast
+import copy
 import datetime as dt
 import re
 from collections.abc import Iterator
@@ -18,9 +19,12 @@ import numpy as np
 import polars as pl
 from arcticdb import Arctic, LazyDataFrame, OutputFormat, QueryBuilder
 from arcticdb.version_store.library import Library, ReadRequest
-from arcticdb.version_store.processing import ExpressionNode
+from arcticdb.version_store.processing import ExpressionNode, PythonFilterClause
 from arcticdb_ext.util import RegexGeneric
-from arcticdb_ext.version_store import OperationType
+from arcticdb_ext.version_store import OperationType, PreloadedIndexQuery
+from arcticdb_ext.storage import KeyType
+
+from polarctic.streaming import plan_row_reads
 
 
 class PolarsToArcticDBTranslator:
@@ -360,20 +364,137 @@ def _iter_read_request_batches(
 
 
 def _register_arctic_source(source: LazyDataFrame) -> pl.LazyFrame:
-    """Register a scan using one ArcticDB lazy source and its resolved index."""
+    """Register a version-pinned scan and group eligible reads by stored row slices.
+
+    Load ArcticDB's table information, including the selected version and index.
+    Build the schema from that loaded index.
+    Fetch the stored row ranges separately because they are not exposed directly.
+    During collection, reuse the index and read nonoverlapping row ranges.
+    """
+
+    # Create a copy to pin the scan to one version but not modify the original query passed to scan_arcticdb()
+    source = copy.copy(source)
+
     cached_schema: pl.Schema | None = None
+    cached_slices: list[tuple[int, int]] | None = None
+    resolved_version: int | None = None
 
     def get_schema() -> pl.Schema:
-        nonlocal cached_schema
+        """Load the selected index and build its schema once."""
+        nonlocal cached_schema, resolved_version
 
         if cached_schema is None:
-            # Discover the schema and save the resolved index on source
-            cached_schema = source._collect_schema()
+            if source._preloaded_index is None:
+                # Choose the requested version and load its index together
+                info = source.lib._nvs._get_info(
+                    source.read_request.symbol,
+                    source.read_request.as_of,
+                    iterate_snapshots_if_tombstoned=False,
+                    include_index_segment=True,
+                )
+
+                # Determine the selected version from the index key
+                resolved_version = info.key.version_id
+
+                # Keep that exact version in our copied read settings
+                source.read_request = source.read_request._replace(
+                    as_of=resolved_version,
+                )
+
+                # Save the index just loaded so schema building and later data reads can reuse it
+                source._preloaded_index = PreloadedIndexQuery(
+                    info.key,
+                    info.index_segment,
+                    info.column_stats_segment,
+                )
+
+            else:
+                # Keep the preloaded index (we need its version number to fetch the matching row layout).
+                # Requesting zero rows using that exact index tells us which version the index belongs to.
+                # In the tested build, this fetched no additional data or index keys:
+                version_probe = source.lib.read(
+                    source.read_request.symbol,
+                    as_of=source._preloaded_index,
+                    row_range=(0, 0),
+                    columns=[],
+                    output_format=OutputFormat.POLARS,
+                )
+
+                resolved_version = version_probe.version
+
+                # Save the version number on the copied wrapper
+                source.read_request = source.read_request._replace(
+                    as_of=resolved_version,
+                )
+
             assert source._preloaded_index is not None, (
-                "Schema discovery did not provide a preloaded index"
+                "Index resolution did not provide a preloaded index"
             )
 
+            # Keep any processing already attached to the ArcticDB query
+            request = source._to_read_request()
+
+            # Get column names/types from the loaded index but do not
+            # call _collect_schema() as it would fetch the index again
+            cached_schema = source.lib._nvs._modify_schema(
+                source._preloaded_index,
+                columns=request.columns,
+                query_builder=request.query_builder,
+                arrow_string_format_default=request.arrow_string_format_default,
+                arrow_string_format_per_column=request.arrow_string_format_per_column,
+            )
+
+            # Allow filters or a plain reads with no processing steps for now
+            clauses = request.query_builder._python_clauses
+            filters_only = all(
+                isinstance(clause, PythonFilterClause)
+                for clause in clauses
+            )
+
+            if (
+                resolved_version is not None
+                and filters_only
+                and request.date_range is None  # date-range reads are not handled by the new planner yet
+            ):
+                # Load the stored row boundaries once and save them in cached_slices.
+                # Later, collection can use them without another layout fetch per batch
+                get_row_slices()
+
         return cached_schema
+
+    def get_row_slices() -> list[tuple[int, int]]:
+        """Read and cache unique stored row ranges for the selected version."""
+        nonlocal cached_slices
+
+        if cached_slices is None:
+            assert resolved_version is not None
+
+            # Read the layout once for the exact version selected above,
+            # then cache the extracted ranges so we do not repeat this for each batch
+            layout = source.lib._nvs.read_index(
+                source.read_request.symbol,
+                as_of=resolved_version,
+            )
+
+            # Keep entries describing stored table-data segments
+            data_layout = layout[
+                layout["key_type"] == int(KeyType.TABLE_DATA)
+            ]
+
+            # Several column segments may cover the same source rows.
+            # Keep each row range once, then sort the ranges by position
+            cached_slices = sorted(
+                {
+                    (int(start), int(end))
+                    for start, end in zip(
+                        data_layout["start_row"],
+                        data_layout["end_row"],
+                        strict=True,
+                    )
+                }
+            )
+
+        return cached_slices
 
     def source_generator(
         with_columns: list[str] | None,
@@ -381,6 +502,8 @@ def _register_arctic_source(source: LazyDataFrame) -> pl.LazyFrame:
         n_rows: int | None,
         batch_size: int | None,
     ) -> Iterator[pl.DataFrame]:
+        """Read planned source ranges, or use the existing batch reader."""
+
         # Resolve the schema/index
         get_schema()
 
@@ -396,17 +519,83 @@ def _register_arctic_source(source: LazyDataFrame) -> pl.LazyFrame:
         if with_columns is not None:
             read_request = read_request._replace(columns=with_columns)
 
-        # Add the new filter to the existing backend query
-        translated_predicate = _translate_predicate(
-            predicate,
-            read_request.query_builder,
-        )
+        # Add the new filter to the existing backend query (without removing existing backend filters)
+        translated_predicate = _translate_predicate(predicate, read_request.query_builder)
+
+        # The original builder is returned on failure so check this before replacing the builder in the request
+        translated_ok = (predicate is None or translated_predicate is not read_request.query_builder)
 
         if translated_predicate is not read_request.query_builder:
             read_request = read_request._replace(
                 query_builder=translated_predicate,
             )
 
+        # Inspect the processing steps in the completed backend query
+        query_builder = read_request.query_builder
+        clauses = (
+            []
+            if query_builder is None
+            else query_builder._python_clauses
+        )
+
+        # Filters can run separately on each group of rows.
+        # Other processing, such as aggregation, is not handled yet
+        filters_only = all(
+            isinstance(clause, PythonFilterClause)
+            for clause in clauses
+        )
+        has_filter = bool(clauses) or predicate is not None
+
+        # Handle positions counted from the start
+        row_range = read_request.row_range or (None, None)
+        nonnegative_bounds = all(
+            position is None or position >= 0
+            for position in row_range
+        )
+
+        # Check whether this request can use stored-slice planning
+        aligned = (
+            batch_size is not None
+            and batch_size > 0
+            and translated_ok
+            and filters_only
+            # Filter-before-limit and limit-before-filter differ.
+            # Keep this combination on the old reader for now
+            and not (has_filter and n_rows is not None)
+            and read_request.date_range is None
+            and resolved_version is not None
+            and nonnegative_bounds
+        )
+
+        if aligned:
+            # Group stored slices using Polars' batch hint.
+            # Each tuple describes one backend read
+            ranges = plan_row_reads(
+                get_row_slices(),
+                batch_size,
+                read_request.row_range,
+                n_rows,
+            )
+
+            for start, end in ranges:
+                # Read this planned range using the same loaded index
+                batch_request = read_request._replace(
+                    row_range=(start, end),
+                )
+                frame = source.lib.read(
+                    **batch_request._asdict()
+                ).data
+
+                # Native filtering may leave no matching rows, so send only nonempty frames to Polars
+                if frame.height > 0:
+                    yield frame
+
+                # Continue to the next planned range even if nothing matched.
+                # Do not calculate the next position from frame.height
+
+            return
+
+        # Use the existing reader for requests not handled by the new planner
         yield from _iter_read_request_batches(
             source.lib,
             read_request,

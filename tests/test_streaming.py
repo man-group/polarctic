@@ -76,7 +76,6 @@ def test_output_batches_preserve_all_rows(arctic_source, sample_data, hint):
         pytest.param(
             pl.col("a") >= 4,
             id="empty-first",
-            marks=FILTERED_BATCHING,
         ),
 
         # First read has only two matches: [1, 2].
@@ -84,21 +83,18 @@ def test_output_batches_preserve_all_rows(arctic_source, sample_data, hint):
         pytest.param(
             pl.col("a") >= 1,
             id="partial-first",
-            marks=FILTERED_BATCHING,
         ),
 
         # First read matches only [0]; later rows match [4, 5]
         pytest.param(
             (pl.col("a") == 0) | (pl.col("a") >= 4),
             id="partial-and-later",
-            marks=FILTERED_BATCHING,
         ),
 
         # Matching rows [2, 3] sit on opposite sides of the read boundary
         pytest.param(
             (pl.col("a") >= 2) & (pl.col("a") <= 3),
             id="boundary-matches",
-            marks=FILTERED_BATCHING,
         ),
 
         # No rows match. The correct final result is an empty table.
@@ -231,7 +227,7 @@ def test_filtered_limit_reaches_late_matching_rows(arctic_source, request, engin
     # - nonzero limits with a batch hint.
     #
     # Zero limits pass. Native single-read filtering also passes
-    if limit > 0 and (fallback or hint is not None):
+    if limit > 0 and fallback:
         request.node.add_marker(pytest.mark.xfail(
             reason=("Known missing Polars fallback" if fallback else "Known B2 filtered-batching bug"),
             strict=True, raises=AssertionError,
@@ -303,7 +299,6 @@ def test_batch_helper_returns_no_rows_beyond_source(arctic_source, sample_data):
     assert list(pc._iter_read_request_batches(lib, request, 4, 2)) == []
 
 
-@FILTERED_BATCHING
 @pytest.mark.parametrize("engine", ["in-memory", "streaming"])
 def test_public_scan_reaches_late_matches_with_engine_hint(tmp_path, engine):
     """Check late matches without replacing the engine's batch-size hint."""
@@ -329,7 +324,6 @@ def test_public_scan_reaches_late_matches_with_engine_hint(tmp_path, engine):
     # in one read. The other tests force a small hint to test multiple reads
 
 
-@FILTERED_BATCHING
 def test_streaming_continues_after_full_chunk_then_empty_chunk(arctic_source):
     """Check full, empty and matching-again slices in the same scan (B2)."""
     # With a three-row hint, this creates three source groups:
@@ -355,7 +349,7 @@ def test_streaming_continues_after_full_chunk_then_empty_chunk(arctic_source):
 
 @pytest.mark.parametrize("engine", [
     "in-memory",
-    pytest.param("streaming", id="streaming", marks=FILTERED_BATCHING),   # reproduced the early-stopping bug
+    pytest.param("streaming", id="streaming"),
 ])
 def test_polars_processing_combines_with_pushdown(arctic_source, sample_data, engine):
     """Check filtering, column selection and Polars grouping in one query."""

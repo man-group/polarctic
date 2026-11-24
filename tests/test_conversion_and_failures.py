@@ -184,18 +184,6 @@ def test_sparse_string_columns_across_appended_segments(
                 "The sparse test data must contain matching and nonmatching rows"
             )
 
-    # With a three-row hint, the first read contains only rows without text.
-    # None matches text == "x", but a matching row exists in the next group.
-    # The current batching bug stops before reaching that later match
-    if operation == "equals-x" and hint == 3:
-        request.node.add_marker(
-            pytest.mark.xfail(
-                reason="Known B2 bug: matching strings occur after an empty filtered slice",
-                strict=True,
-                raises=AssertionError,
-            )
-        )
-
     # Version 1 includes both the original and appended rows
     with override_batch_hint(hint):
         query = pc.scan_arcticdb(lib, "sparse", as_of=1)
