@@ -215,3 +215,14 @@ def sample_data() -> pl.DataFrame:
         },
         schema_overrides={"a": pl.Int64, "b": pl.Float64},
     )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def windows_timezone_database():
+    """Provide the timezone files required by native code on Windows."""
+    if sys.platform == "win32":
+        from pyarrow.util import download_tzdata_on_windows
+
+        # Windows CI still requires this setup (even with ArcticDB 7.0.0).
+        # Download them once before the tests run.
+        download_tzdata_on_windows()
