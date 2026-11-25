@@ -299,9 +299,24 @@ def _translate_predicate(
         return PushdownFilter(cast(QueryBuilder, translated), fallback_to_polars=False)
     
     except (NotImplementedError, ValueError):
+        # TODO: Add optional INFO logging for local filter fallback
+        # Monday: https://man312219.monday.com/boards/7852509418/pulses/13639319069
         # Keep the existing backend query and apply this filter locally
         return PushdownFilter(query_builder, fallback_to_polars=True)
 
+
+def _filter_and_yield(
+    frame: pl.DataFrame,
+    fallback_predicate: pl.Expr | None,
+) -> Iterator[pl.DataFrame]:
+    """Apply a local filter when needed and yield only nonempty results."""
+    if fallback_predicate is not None:
+        # ArcticDB did not apply this filter, so apply it using Polars
+        frame = frame.filter(fallback_predicate)
+
+    # Only send non-empty results to Polars
+    if frame.height > 0:
+        yield frame
 
 def _iter_read_request_batches(
     lib: Library,
@@ -325,13 +340,7 @@ def _iter_read_request_batches(
             rr = rr._replace(row_range=(base_start, end))
         frame = cast(pl.DataFrame, lib.read(**rr._asdict()).data)
 
-        if fallback_predicate is not None:
-            # Apply unsupported filtering before returning the frame
-            frame = frame.filter(fallback_predicate)
-
-        # Do not return an empty batch
-        if frame.height > 0:
-            yield frame
+        yield from _filter_and_yield(frame, fallback_predicate)
         return
 
     # Streaming path: yield fixed-size batches so Polars can process them incrementally.
@@ -367,17 +376,16 @@ def _iter_read_request_batches(
         batch_request = read_request._replace(row_range=(batch_start, batch_end))
         frame = cast(pl.DataFrame, lib.read(**batch_request._asdict()).data)
 
-        # Count backend rows before local filtering removes any
+        # Count rows before local fallback filtering.
+        # Native ArcticDB filtering may already have removed rows.
+        # TODO: Fix native-filtered empty/short reads in the slice-aligned streaming PR.
         rows_read = frame.height
         if rows_read == 0:
             break
 
-        if fallback_predicate is not None:
-            frame = frame.filter(fallback_predicate)
-
-        # An empty filtered batch does not mean the source has ended
-        if frame.height > 0:
-            yield frame
+        # Local filtering may remove every row.
+        # Skip that output batch, but still advance past the source rows below
+        yield from _filter_and_yield(frame, fallback_predicate)
 
         # Advance past the backend rows, including those filtered out
         read_offset += rows_read
@@ -432,11 +440,8 @@ def _register_arctic_source(
             read_request.query_builder,
         )
 
-        # Only replace the query builder if translation produced a new one
-        if pushdown_filter.query_builder is not read_request.query_builder:
-            read_request = read_request._replace(
-                query_builder=pushdown_filter.query_builder,
-            )
+        # Use the returned builder
+        read_request = read_request._replace(query_builder=pushdown_filter.query_builder)
 
         # Pass a local filter only when translation failed
         fallback_predicate = (
