@@ -98,17 +98,18 @@ def test_null_string_filters_match_polars(arctic_source, predicate):
 
 @pytest.mark.parametrize("hint", [None, 3], ids=["single-read", "batched"])
 @pytest.mark.parametrize(
-    "operation",
+    "predicate",
     [
-        # Read all rows and columns
-        "read",
+        # No filter: read the complete table
+        pytest.param(None, id="read"),
 
-        # Keep rows where text is missing
-        "null",
+        # Keep rows with missing text
+        pytest.param(pl.col("text").is_null(), id="null"),
 
-        # Keep rows where text is present (produced incorrect results in the recorded run)
+        # Keep rows where text is present (remains a known translator bug on the tests branch)
         pytest.param(
-            "not-null",
+            ~pl.col("text").is_null(),
+            id="not-null",
             marks=pytest.mark.xfail(
                 reason="Known negated-null translation bug",
                 strict=True,
@@ -116,32 +117,30 @@ def test_null_string_filters_match_polars(arctic_source, predicate):
             ),
         ),
 
-        # Keep rows where text equals "x"
-        "equals-x",
+        # Keep rows where text is exactly "x"
+        pytest.param(pl.col("text") == "x", id="equals-x"),
     ],
 )
-def test_sparse_string_columns_across_appended_segments(
-    arctic_source, request, hint, operation
-):
-    """Check reading and filtering a column absent from earlier stored segments."""
+def test_sparse_string_columns_across_appended_segments(arctic_source, request, hint, predicate):
+    """Read and filter a column missing from the earlier stored rows."""
     lib = arctic_source.library
 
-    # First write: the table contains only column a; text does not exist yet
-    first_rows = pl.DataFrame({"a": [0, 1, 2]})
+    # The first three rows have no text column
+    lib.write("sparse", pl.DataFrame({"a": [0, 1, 2]}))
 
-    lib.write("sparse", first_rows)
-
-    # Append a column that did not exist in the first write (so its values in the earlier rows should be null)
-    later_rows = pl.DataFrame(
-        {
-            "a": [3, 4, 5],
-            "text": ["x", None, "y"],
-        }
+    # Add three more rows, now including text
+    lib.append(
+        "sparse",
+        pl.DataFrame(
+            {
+                "a": [3, 4, 5],
+                "text": ["x", None, "y"],
+            }
+        ),
     )
-    lib.append("sparse", later_rows)
 
-    # Describe the complete expected table after the append (the first three rows have null text because 
-    # the column did not exist; the last three rows contain the values supplied in the append)
+    # Earlier rows should have null text after the append.
+    # Specify String explicitly so the expected type is unambiguous
     expected_data = pl.DataFrame(
         {
             "a": [0, 1, 2, 3, 4, 5],
@@ -152,42 +151,22 @@ def test_sparse_string_columns_across_appended_segments(
         }
     )
 
-    # Define the operation once so both the scan and reference data
-    # receive exactly the same filtering and selection
     def apply(frame):
-        if operation == "read":
+        """Apply the selected filter and output columns."""
+        if predicate is None:  # read only
             return frame
 
-        # Choose the filter for this test run.
-        predicates = {
-            # Missing text: a values 0, 1, 2 and 4
-            "null": pl.col("text").is_null(),
-
-            # Present text: a values 3 and 5
-            "not-null": ~pl.col("text").is_null(),
-
-            # The string "x": a value 3
-            "equals-x": pl.col("text") == "x",
-        }
-
         # Filter using text, but return only a (the reader must keep text available until filtering is finished)
-        return frame.filter(predicates[operation]).select("a")
+        return frame.filter(predicate).select("a")
 
-    # Calculate the expected result before collecting through Polarctic
     expected = oracle(expected_data, apply)
 
-    # The read case deliberately returns the complete table.
-    # Only the filtering cases should remove rows
-    if operation != "read":
-        if not 0 < expected.height < expected_data.height:
-            raise RuntimeError(
-                "The sparse test data must contain matching and nonmatching rows"
-            )
-
-    # With a three-row hint, the first read contains only rows without text.
-    # None matches text == "x", but a matching row exists in the next group.
-    # The current batching bug stops before reaching that later match
-    if operation == "equals-x" and hint == 3:
+    # On the tests branch, batched equality filtering stops too early (the first slice has no matches, but "x" exists in a later slice)
+    if (
+        predicate is not None
+        and predicate.meta.eq(pl.col("text") == "x")
+        and hint == 3
+    ):
         request.node.add_marker(
             pytest.mark.xfail(
                 reason="Known B2 bug: matching strings occur after an empty filtered slice",
@@ -196,18 +175,18 @@ def test_sparse_string_columns_across_appended_segments(
             )
         )
 
-    # Version 1 includes both the original and appended rows
     with override_batch_hint(hint):
+        # Version 1 contains both the original and appended rows
         query = pc.scan_arcticdb(lib, "sparse", as_of=1)
-
         actual = apply(query).collect(engine="streaming")
 
-    # Check all values, row order, column order and types
+    # Check all values, row order, column names and types
     assert_frame_equal(actual, expected)
 
 
+@pytest.mark.parametrize("hint", [None, 3], ids=["single-read", "batched"])
 @pytest.mark.parametrize("operation", ["head_zero", "no_matches", "empty_symbol"])
-def test_empty_results_keep_schema(arctic_source, sample_data, operation):
+def test_empty_results_keep_schema(arctic_source, sample_data, operation, hint):
     """Check that empty results retain their column names, order and types."""
     lib = arctic_source.library
 
@@ -215,28 +194,30 @@ def test_empty_results_keep_schema(arctic_source, sample_data, operation):
     # head(0) removes all rows but keeps the schema
     expected = sample_data.head(0)
 
-    if operation == "empty_symbol":
-        # Start with an empty stored table with the full explicitly typed schema
-        lib.write("empty", expected)
-        query = pc.scan_arcticdb(lib, "empty", as_of=0)
-        # Compare with the empty-table representation returned directly by ArcticDB.
-        # This checks that Polarctic preserves the backend output
-        expected = lib.read("empty", as_of=0, output_format=OutputFormat.POLARS).data
+    with override_batch_hint(hint):
 
-    else:
-        # Start with a nonempty stored table
-        lib.write("data", sample_data)
-        query = pc.scan_arcticdb(lib, "data", as_of=0)
+        if operation == "empty_symbol":
+            # Start with an empty stored table with the full explicitly typed schema
+            lib.write("empty", expected)
+            query = pc.scan_arcticdb(lib, "empty", as_of=0)
+            # Compare with the empty-table representation returned directly by ArcticDB.
+            # This checks that Polarctic preserves the backend output
+            expected = lib.read("empty", as_of=0, output_format=OutputFormat.POLARS).data
 
-        # One case requests no rows (just the expected columns); the other removes every row by filtering
-        query = query.head(0) if operation == "head_zero" else query.filter(pl.col("a") > 100)
+        else:
+            # Start with a nonempty stored table
+            lib.write("data", sample_data)
+            query = pc.scan_arcticdb(lib, "data", as_of=0)
 
-    # Before execution, the planned column names and types should be correct
-    assert query.collect_schema() == expected.schema
+            # One case requests no rows (just the expected columns); the other removes every row by filtering
+            query = query.head(0) if operation == "head_zero" else query.filter(pl.col("a") > 100)
 
-    # Execute the query and check the complete empty result.
-    # Having zero rows must not cause columns or their types to disappear
-    assert_frame_equal(query.collect(), expected)
+        # Before execution, the planned column names and types should be correct
+        assert query.collect_schema() == expected.schema
+
+        # Execute the query and check the complete empty result.
+        # Having zero rows must not cause columns or their types to disappear
+        assert_frame_equal(query.collect(engine="streaming"), expected)
 
 
 def test_missing_symbol_propagates_arcticdb_error(arctic_source):
@@ -273,8 +254,9 @@ def test_unsupported_stored_representation_reports_clear_error(arctic_source, re
         # Store a saved Python dictionary
         lib.write_pickle("unsupported", {"a": [1, 2]})
 
-    # Scanning these objects should raise an informative unsupported-data error,
-    # indicating an error type and a relevant word in its message
+    # ArcticDB rejects these objects with an unsupported-data schema error.
+    # Polars may wrap it in ComputeError, keeping the original ArcticDB message.
+    # Accept either exception form and check that the message describes the rejection
     with pytest.raises(
         (ArcticException, NotImplementedError, pl.exceptions.ComputeError),
         match="(?i)(recursive|pickl|unsupported|not supported|schema)",
@@ -299,9 +281,9 @@ def test_read_failure_after_first_batch_is_not_silent(arctic_source, sample_data
         if self is lib and not kwargs.get("lazy", False):
             count += 1
 
-            # Deliberately fail the second executing read
+            # Simulate an ArcticDB failure during the second data read
             if count == 2:
-                raise RuntimeError("injected storage failure")
+                raise ArcticException("injected storage failure")
 
         return original(self, *args, **kwargs)
 
@@ -312,8 +294,12 @@ def test_read_failure_after_first_batch_is_not_silent(arctic_source, sample_data
         # Use a small batch hint so collection needs multiple reads.
         # batches records the data delivered before the failure
         with override_batch_hint(3) as batches:
-            # Collection must report our error, not return a partial result
-            with pytest.raises((RuntimeError, pl.exceptions.PolarsError), match="injected storage failure"):
+            # Collection must report the storage failure, not return partial data.
+            # Polars may wrap it in ComputeError when collecting data from the Python reader, so accept either form
+            with pytest.raises(
+                (ArcticException, pl.exceptions.ComputeError),
+                match="injected storage failure"
+            ):
                 pc.scan_arcticdb(lib, "data", as_of=0).collect(engine="streaming")
 
     # Check that the second read was reached

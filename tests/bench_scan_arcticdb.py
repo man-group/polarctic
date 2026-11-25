@@ -10,114 +10,104 @@ this software will be governed by the Apache License, version 2.0.
 """Compare Polarctic pushdown with a full ArcticDB read followed by Polars filtering."""
 
 import datetime as dt
-from contextlib import nullcontext
 
 import polars as pl
 import pytest
-from arcticdb import Arctic, LibraryOptions, OutputFormat
+from arcticdb import LibraryOptions, OutputFormat
 from polars.testing import assert_frame_equal
 
 import polarctic.polarctic as pc
-from tests.utils import collect_storage_stats, enable_polars_writes
+from tests.utils import override_batch_hint
 
 
 @pytest.fixture
-def benchmark_data(tmp_path):
-    """Store one fixed version with several timeseries segments."""
-    # Each benchmark case gets its own temporary local store
-    uri = f"lmdb://{tmp_path / 'benchmark_store'}"
-    ac = Arctic(uri, output_format=OutputFormat.POLARS)
-    name = "benchmark"
-    symbol = "data"
-    lib = ac.create_library(
-        name,
-        library_options=LibraryOptions(rows_per_segment=10_000),
-    )
-    enable_polars_writes(lib)
-    start = dt.datetime(2020, 1, 1)
-    data = pl.DataFrame({
-        "timestamp": pl.datetime_range(
-            start,
-            start + dt.timedelta(seconds=99_999),
-            interval="1s",
-            time_unit="ns",
-            eager=True,
-        ),
-        "a": pl.Series(range(100_000), dtype=pl.Int64),
-        "b": pl.Series(range(100_000), dtype=pl.Float64),
-    })
-    try:
-        # Use the first column as its datetime index
-        lib.write(symbol, data, index_column=True)
-        yield lib, data, symbol
-    finally:
-        ac.delete_library(name)
+def benchmark_data(library_factory):
+    """Create a local benchmark source containing 100,000 timestamped rows."""
+    # Use the shared factory, but choose larger segments for this dataset
+    source = library_factory(library_options=LibraryOptions(rows_per_segment=10_000))
 
+    start = dt.datetime(2020, 1, 1)
+    data = pl.DataFrame(
+        {
+            # One row per second, with timestamp first for index_column=True
+            "timestamp": pl.datetime_range(
+                start,
+                start + dt.timedelta(seconds=99_999),
+                interval="1s",
+                time_unit="ns",
+                eager=True,
+            ),
+            "a": pl.Series(range(100_000), dtype=pl.Int64),
+            "b": pl.Series(range(100_000), dtype=pl.Float64),
+        }
+    )
+
+    source.library.write("data", data, index_column=True)
+    return source, data
 
 
 # Compare a numeric filter and a filter on the stored datetime index
 @pytest.mark.parametrize("query_name", ["value-filter", "time-range"])
 @pytest.mark.parametrize("implementation", ["polarctic", "read-then-polars"])
-@pytest.mark.parametrize("stats_enabled", [False, True], ids=["stats-off", "stats-on"])
-def bench_scan_comparison(
-    benchmark, benchmark_data, query_name, implementation, stats_enabled
-):
-    """Time the two workflows, with and without query-statistics recording."""
-    # Get the local library, input data and symbol
-    lib, data, symbol = benchmark_data
+@pytest.mark.parametrize(
+    "batch_hint",
+    [
+        pytest.param(None, id="single-read"),
+        pytest.param(5_000, id="hint-5000"),
+        pytest.param(10_000, id="hint-10000"),
+        pytest.param(25_000, id="hint-25000"),
+    ],
+)
+def bench_scan_comparison(benchmark, benchmark_data, query_name, implementation, batch_hint):
+    """Measure repeated collection with different Polarctic batch hints."""
+    source, data = benchmark_data
+    lib = source.library
 
     if query_name == "value-filter":
         # Keep the final 10,000 rows using their numeric values
         predicate = pl.col("a") >= 90_000
     else:
-        # Select the same rows by timestamp, 90,000 seconds after the start
+        # Request the same final 10,000 rows using their timestamps (90,000 seconds after the start)
         predicate = pl.col("timestamp") >= dt.datetime(2020, 1, 2, 1)
 
     # Apply the same filter and column selection in both workflows
     def apply(frame):
         return frame.filter(predicate).select("timestamp", "a")
 
-    expected = apply(data.lazy()).collect(engine="in-memory")
+    # Calculate the expected answer without using the connector
+    expected = apply(data.lazy()).collect(engine="streaming")
 
-    # Prepare a reusable Polarctic plan for the fixed stored version before timing starts.
-    # These measurements cover warm/repeated collection, not cold storage
-    query = apply(pc.scan_arcticdb(lib, symbol, as_of=0))
+    # Prepare the scan before timing starts
+    with override_batch_hint(batch_hint, record_batches=False):
+        query = apply(pc.scan_arcticdb(lib, "data"))
 
     def pushed():
-        # Collect through Polarctic: the connector can send supported filtering
-        # and column selection to ArcticDB before the backend returns the data
-        return query.collect(engine="in-memory")
+        """Collect through Polarctic using the prepared scan."""
+        return query.collect(engine="streaming")
 
     def baseline():
-        # Read the complete stored version from ArcticDB without backend filtering
-        # or column selection, then apply both operations in Polars
-        frame = lib.read(symbol, as_of=0, output_format=OutputFormat.POLARS).data
-        return apply(frame.lazy()).collect(engine="in-memory")
+        """Read the full table, then filter and select using Polars."""
+        frame = lib.read("data", output_format=OutputFormat.POLARS).data
+        return apply(frame.lazy()).collect(engine="streaming")
 
     # Verify both workflows before measuring either of them
     assert_frame_equal(pushed(), expected)
     assert_frame_equal(baseline(), expected)
+
     run = pushed if implementation == "polarctic" else baseline
 
-    if stats_enabled:
-        # Record one separate, untimed execution for inspection.
-        # Preserve the plain ArcticDB snapshot as benchmark metadata.
-        with collect_storage_stats() as sample_stats:
-            sample = run()
-        assert_frame_equal(sample, expected)
-        benchmark.extra_info["sample_query_stats"] = sample_stats
+    # The plan and fixture setup are outside the timed function.
+    # This measures warm, repeated execution—not cold storage access
+    benchmark(run)
 
-    # Enable recording once around the entire timing run.
-    # Collector setup and snapshot retrieval are outside the timed callable.
-    # The timed work includes recording overhead when enabled
-    scope = collect_storage_stats() if stats_enabled else nullcontext()
-    with scope:
-        benchmark(run)
 
+    # These fields are included in pytest-benchmark's JSON output
     benchmark.extra_info["dataset_rows"] = data.height
-    benchmark.extra_info["arcticdb_version_requested"] = 0
-    benchmark.extra_info["measurement"] = "warm repeated execution, in-memory engine"
+    benchmark.extra_info["batch_hint"] = batch_hint
+    benchmark.extra_info["engine"] = "streaming"
     benchmark.extra_info["storage"] = "LMDB"
+    benchmark.extra_info["measurement"] = "warm repeated execution"
 
-    # LMDB reads may not appear in query statistics.
-    # Use the memory-backed unit tests to check data-segment read counts
+    # The hint controls Polarctic's reader, not the full-read baseline.
+    # The baseline is repeated for each hint to keep the cases paired
+    benchmark.extra_info["hint_applies_to"] = "Polarctic reader only"

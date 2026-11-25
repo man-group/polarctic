@@ -25,7 +25,6 @@ from arcticdb import Arctic, LibraryOptions, OutputFormat
 from arcticdb.version_store.library import Library
 
 from polarctic.polarctic import PolarsToArcticDBTranslator
-from tests.utils import enable_polars_writes
 
 
 @pytest.fixture
@@ -138,26 +137,55 @@ class ArcticSource:
 
 
 @pytest.fixture
-def arctic_source(tmp_path: Path) -> Iterator[ArcticSource]:
-    """Create an empty temporary ArcticDB library."""
-    uri = f"lmdb://{tmp_path / 'connector_store'}"
-    ac = Arctic(uri, output_format=OutputFormat.POLARS)
-    library_name = "connector_tests"
-    lib = ac.create_library(
-        library_name,
+def library_factory(tmp_path: Path):
+    """Create isolated libraries with test-specific storage options."""
+    created = []
+
+    def create(
+        *,
+        storage: str = "lmdb",
+        library_options: LibraryOptions | None = None,
+    ) -> ArcticSource:
+        """Create an empty library and return its connection details."""
+        number = len(created)
+        library_name = f"test_library_{number}"
+
+        if storage == "lmdb":
+            # Each connection gets a separate local directory
+            uri = f"lmdb://{tmp_path / f'store_{number}'}"
+        elif storage == "memory":
+            # Each Arctic instance gets an isolated memory store
+            uri = "mem://"
+        else:
+            raise ValueError(f"Unsupported test storage: {storage}")
+
+        ac = Arctic(uri, output_format=OutputFormat.POLARS)
+        lib = ac.create_library(
+            library_name,
+            library_options=library_options or LibraryOptions(),
+        )
+
+        created.append((ac, library_name))
+        return ArcticSource(uri, library_name, lib)
+
+    try:
+        yield create
+    finally:
+        # Delete only libraries created by this fixture
+        for ac, library_name in reversed(created):
+            ac.delete_library(library_name)
+
+
+@pytest.fixture
+def arctic_source(library_factory) -> ArcticSource:
+    """Create an empty temporary ArcticDB library with small segments for connector tests."""
+    return library_factory(
         library_options=LibraryOptions(
             rows_per_segment=3,
             columns_per_segment=2,
             dynamic_schema=True,
         ),
     )
-
-    enable_polars_writes(lib)
-
-    try:
-        yield ArcticSource(uri, library_name, lib)
-    finally:
-        ac.delete_library(library_name)
 
 
 @pytest.fixture
@@ -187,13 +215,3 @@ def sample_data() -> pl.DataFrame:
         },
         schema_overrides={"a": pl.Int64, "b": pl.Float64},
     )
-
-
-@pytest.fixture(scope="session", autouse=True)
-def windows_timezone_database():
-    """Provide the timezone files needed by ArcticDB on Windows."""
-    if sys.platform == "win32":
-        from pyarrow.util import download_tzdata_on_windows
-
-        # ArcticDB's native code expects these files on Windows
-        download_tzdata_on_windows()

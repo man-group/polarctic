@@ -9,9 +9,6 @@ License, use of this software will be governed by the Apache License, version 2.
 
 """Check version consistency during writes and isolation between query branches."""
 
-from concurrent.futures import ThreadPoolExecutor
-from threading import Event
-
 import polars as pl
 import pytest
 from arcticdb.version_store.library import Library
@@ -55,9 +52,9 @@ from tests.utils import oracle, override_batch_hint
 # while mixed columns can also make joining batches fail
 @pytest.mark.parametrize("change_schema", [False, True], ids=["values-only", "new-column"])
 def test_scan_keeps_one_version_while_writer_publishes_new_data(
-    arctic_source, sample_data, as_of, write_point, change_schema
+    arctic_source, sample_data, monkeypatch, as_of, write_point, change_schema
 ):
-    """Check version consistency when new data is written before collection or between reads."""
+    """Keep the original version when a write happens before or between reads."""
     # Write the original table as version 0
     lib = arctic_source.library
     lib.write("data", sample_data)
@@ -67,45 +64,23 @@ def test_scan_keeps_one_version_while_writer_publishes_new_data(
         # Add another column in the schema-changing cases
         changed = changed.with_columns(extra=pl.lit("new"))
 
-    # Coordinate the write using signals
-    start_write = Event()   # Allow the writer to begin
-    write_done = Event()   # Report that the write attempt has finished
     original_read = Library.read
-    reads = 0
+    executing_reads = 0
 
-    def write_new_version():
-        # This function runs in the worker thread.
-        # Wait for the test to signal the intended write point
-        if not start_write.wait(timeout=10):
-            raise TimeoutError("The test never requested the write")
+    def read_and_write(self, *args, **kwargs):
+        """Write version 1 after the first executing read finishes."""
+        nonlocal executing_reads
 
-        # Write the changed table under the same symbol (create version 1)
-        try:
-            lib.write("data", changed)
-
-        finally:
-            # Signal that the write attempt has ended, even if it raised
-            write_done.set()
-
-    def read_and_pause(self, *args, **kwargs):
-        # Update the reads counter defined in the outer test
-        nonlocal reads
-
-        # Perform the real read before checking whether to trigger the write.
-        # In the between-batches case, the first read therefore uses version 0
+        # Complete the real read before publishing the new version
         result = original_read(self, *args, **kwargs)
 
-        # Count only executing reads through this particular library object
+        # Ignore lazy setup and reads from other libraries
         if self is lib and not kwargs.get("lazy", False):
-            reads += 1
+            executing_reads += 1
 
-            if write_point == "between_batches" and reads == 1:
-                # The first batch read has completed so tell the writer to publish version 1 now
-                start_write.set()
-
-                # Wait until the write attempt finishes before returning, so the next read happens after the new version exists
-                if not write_done.wait(timeout=10):
-                    raise TimeoutError("The writer did not finish")
+            if write_point == "between_batches" and executing_reads == 1:
+                # Publish version 1 before the reader requests its next batch
+                lib.write("data", changed)
 
         return result
 
@@ -113,145 +88,96 @@ def test_scan_keeps_one_version_while_writer_publishes_new_data(
     with override_batch_hint(3):
         query = pc.scan_arcticdb(lib, "data", as_of=as_of)
 
-        # Ask for the schema before starting the writer (at this point only version 0 exists)
+        # Discover the schema while only version 0 exists
         assert query.collect_schema() == sample_data.schema
 
-        # Run the writer in one worker thread while the main thread collects the scan
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            # Start the writer; it waits until start_write is signalled
-            writer = pool.submit(write_new_version)
+        if write_point == "after_schema":
+            # Publish version 1 before any data is collected
+            lib.write("data", changed)
 
-            try:
-                if write_point == "after_schema":
-                    # The original schema has already been discovered so write version 1 before collection starts
-                    start_write.set()
-                    if not write_done.wait(timeout=10):
-                        raise TimeoutError("The writer did not finish")
-
-                # Temporarily wrap reads to trigger the write between batches when requested
-                with pytest.MonkeyPatch.context() as mp:
-                    mp.setattr(Library, "read", read_and_pause)
-                    # Collect the original scan. Every batch must still use the version selected when the original schema was discovered
-                    actual = query.collect(engine="streaming")
-
-            finally:
-                # Release the writer even if collection failed before triggering it
-                start_write.set()
-
-                # Wait for completion and propagate any error raised by the writer
-                writer.result(timeout=10)
+        # Wrap reads only after schema discovery
+        with monkeypatch.context() as mp:
+            mp.setattr(Library, "read", read_and_write)
+            actual = query.collect(engine="streaming")
 
     if write_point == "between_batches":
-        # A second read is required to exercise reading after the new write
-        if reads < 2:
-            raise RuntimeError("This setup did not exercise multiple reads")
+        # Without a second read, we would not test reading after the write
+        assert executing_reads >= 2, ("The test must perform another read after publishing version 1")
 
-    # Check that all values and the schema still match version 0
+    # Every returned row and column must still match version 0
     assert_frame_equal(actual, sample_data)
 
-    # This checks returned data, not the identity or reuse of storage index keys.
-    # Separate instrumentation is needed to verify those storage-level properties.
 
 
-def test_branches_and_repeated_collection_do_not_share_instructions(arctic_source, sample_data):
-    """Check that filters, selections and limits remain separate between queries."""
-    # Write one fixed version for every branch to read
+@pytest.mark.parametrize(
+    "operation",
+    [
+        pytest.param(
+            lambda frame: frame.filter(pl.col("a") < 3),
+            id="lower-filter",
+        ),
+        pytest.param(
+            lambda frame: frame.filter(pl.col("a") >= 3),
+            id="upper-filter",
+        ),
+        pytest.param(
+            lambda frame: frame.select("a").head(1),
+            id="one-column-one-row",
+        ),
+        pytest.param(
+            lambda frame: frame.select("b", "a").head(4),
+            id="reordered-columns",
+        ),
+        pytest.param(
+            lambda frame: frame.slice(2, 3).select("desk"),
+            id="middle-rows",
+        ),
+        pytest.param(
+            lambda frame: frame,
+            id="original-source",
+        ),
+    ],
+)
+def test_repeated_collection_preserves_query(arctic_source, sample_data, operation):
+    """Collect each operation twice without changing its result."""
     lib = arctic_source.library
     lib.write("data", sample_data)
 
-    # Disable batching to isolate query-state handling from streaming bugs
+    # Calculate the expected result using only the original Polars table
+    expected = oracle(sample_data, operation)
+
+    # Disable batching so this test focuses on query state
     with override_batch_hint(None):
-        source = pc.scan_arcticdb(lib, "data", as_of=0)
+        source = pc.scan_arcticdb(lib, "data")
+        query = operation(source)
 
-        # Create different queries from the same source.
-        # Each branch must keep its own instructions without changing the others
+        first_collect = query.collect()
+        second_collect = query.collect()
 
-        # Two branches with opposite filters
+    # Both collections must return the same correct values and types
+    assert_frame_equal(first_collect, expected)
+    assert_frame_equal(second_collect, expected)
+
+
+def test_branches_do_not_change_each_other(arctic_source, sample_data):
+    """Keep different branches and their shared source independent."""
+    lib = arctic_source.library
+    lib.write("data", sample_data)
+
+    with override_batch_hint(None):
+        # Build several branches from the same scan
+        source = pc.scan_arcticdb(lib, "data")
         lower = source.filter(pl.col("a") < 3)
+        narrow = source.select("a").head(1)
         upper = source.filter(pl.col("a") >= 3)
 
-        # Return one column and only the first row
-        narrow = source.select("a").head(1)
+        # Alternate between branches to catch instructions leaking between them
+        assert_frame_equal(lower.collect(), sample_data.filter(pl.col("a") < 3))
+        assert_frame_equal(narrow.collect(), sample_data.select("a").head(1))
+        assert_frame_equal(upper.collect(), sample_data.filter(pl.col("a") >= 3))
 
-        # Return two columns in a different order and the first four rows
-        reordered = source.select("b", "a").head(4)
+        # Collect an earlier branch again after using the other branches
+        assert_frame_equal(lower.collect(), sample_data.filter(pl.col("a") < 3))
 
-        # Return three rows starting at position 2, with only the desk column
-        middle = source.slice(2, 3).select("desk")
-
-        # Alternate branches with different instructions, 
-        # then repeat earlier branches and finally collect the original source.
-        #
-        # This checks that:
-        # - one branch's filter does not affect another;
-        # - selections and limits do not leak into other branches;
-        # - repeated collection still gives the same answer;
-        # - the original source still returns all rows and columns.
-        cases = [
-            (
-                "lower-filter",
-                lower,
-                lambda frame: frame.filter(pl.col("a") < 3),
-            ),
-            (
-                "one-column-one-row",
-                narrow,
-                lambda frame: frame.select("a").head(1),
-            ),
-            (
-                "upper-filter",
-                upper,
-                lambda frame: frame.filter(pl.col("a") >= 3),
-            ),
-            (
-                "reordered-columns",
-                reordered,
-                lambda frame: frame.select("b", "a").head(4),
-            ),
-            (
-                "middle-rows",
-                middle,
-                lambda frame: frame.slice(2, 3).select("desk"),
-            ),
-            (
-                "lower-filter-repeated",
-                lower,
-                lambda frame: frame.filter(pl.col("a") < 3),
-            ),
-            (
-                "narrow-repeated",
-                narrow,
-                lambda frame: frame.select("a").head(1),
-            ),
-            (
-                "original-source",
-                source,
-                lambda frame: frame,
-            ),
-        ]
-
-        for name, query, operation in cases:
-            # Calculate this branch's expected result using only Polars
-            expected = oracle(sample_data, operation)
-
-            # Apply sanity check for the filtering operations
-            if name in {
-                "lower-filter",
-                "upper-filter",
-                "lower-filter-repeated",
-            }:
-                if not 0 < expected.height < sample_data.height:
-                    raise RuntimeError(
-                        "The branch filter needs matching and nonmatching rows"
-                    )
-
-            # Collect the branch and compare values, order and types
-            actual = query.collect()
-
-            try:
-                assert_frame_equal(actual, expected)
-            except AssertionError as exc:
-                # Include the branch name so a failure is easier to locate
-                raise AssertionError(
-                    f"Incorrect result for branch: {name}"
-                ) from exc
+        # The shared source must still return every original row and column
+        assert_frame_equal(source.collect(), sample_data)

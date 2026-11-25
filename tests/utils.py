@@ -61,6 +61,8 @@ def observe_reads() -> Iterator[list[ObservedRead]]:
 @contextmanager
 def override_batch_hint(
     size: int | None,
+    *,
+    record_batches: bool = True,
 ) -> Iterator[list[pl.DataFrame]]:
     """Override the hint and record batches for scans created in this block."""
     batches: list[pl.DataFrame] = []
@@ -78,7 +80,9 @@ def override_batch_hint(
         ) -> Iterator[pl.DataFrame]:
             # Preserve all arguments except the batch-size hint
             for batch in io_source(columns, predicate, n_rows, size):
-                batches.append(batch)
+                # Tests can record batches; benchmarks only need the hint override
+                if record_batches:
+                    batches.append(batch)
                 yield batch
 
         return original(io_source=source, **kwargs)
@@ -116,12 +120,9 @@ def collect_storage_stats() -> Iterator[dict[str, Any]]:
             # Run the code being measured
             yield result
         finally:
-            try:
-                # Save the counts, even if the code fails
-                result.update(qs.get_query_stats())
-            finally:
-                # Clear the counts for the next test
-                qs.reset_stats()
+            # Save the counts, even if the code fails
+            result.update(qs.get_query_stats())
+            qs.reset_stats()
 
     # Recording stops automatically when the context ends
 
@@ -135,13 +136,3 @@ def query_stats_operation_count(stats, operation, key_type):
         .get(key_type, {})
         .get("count", 0)
     )
-
-
-def enable_polars_writes(lib: Library) -> None:
-    """Enable experimental Polars writes in older ArcticDB builds."""
-    # GitHub CI uses public ArcticDB builds that may need this switch.
-    # Newer builds accept Polars input without it
-    enable = getattr(lib._nvs, "_set_allow_arrow_input", None)
-
-    if enable is not None:
-        enable(True)

@@ -15,7 +15,7 @@ from arcticdb import Arctic, LibraryOptions, OutputFormat, QueryBuilder
 from polars.testing import assert_frame_equal
 
 import polarctic.polarctic as pc
-from tests.utils import backend_frame, enable_polars_writes, observe_reads, oracle, override_batch_hint
+from tests.utils import backend_frame, observe_reads, oracle, override_batch_hint
 
 
 # These cases reproduce the early termination bug after filtered reads.
@@ -50,10 +50,15 @@ def test_output_batches_preserve_all_rows(arctic_source, sample_data, hint):
     # Nonempty input should produce at least one batch
     assert batches, "No batches were emitted for nonempty input"
 
-    # Every emitted batch should contain rows, and its column names, order and types should match the input
-    assert all(batch.height > 0 and batch.schema == sample_data.schema for batch in batches)
+    # The current reader returns hint-sized batches, so only the last batch may be smaller.
+    # Example: eight rows with hint=3 gives heights [3, 3, 2]
+    expected_heights = [min(hint, sample_data.height - start) for start in range(0, sample_data.height, hint)]
+    assert [batch.height for batch in batches] == expected_heights
 
-    # The total number of emitted rows should match the input
+    # Every batch must keep the input column names, order and types
+    assert all(batch.schema == sample_data.schema for batch in batches)
+
+    # All batches together must contain the original number of rows
     assert sum(batch.height for batch in batches) == sample_data.height
 
     # Join the batches and check every value and the row order (counting rows 
@@ -63,69 +68,41 @@ def test_output_batches_preserve_all_rows(arctic_source, sample_data, hint):
     # Check the equality with the final result returned by Polars
     assert_frame_equal(actual, sample_data)
 
-    # A hint is not a strict batch-size requirement. 
-    # This test does not require every batch to have exactly hint rows.
-    # Storage-key statistics are still needed to check full-slice IO efficiency
 
-
+@pytest.mark.parametrize("hint", [1, 2, 3, 4])
 @pytest.mark.parametrize(
-    "predicate",
+    ("predicate", "failing_hints"),
     [
-        # First read covers [0, 1, 2], which has no matches.
-        # The reader must continue to find [4, 5] later
-        pytest.param(
-            pl.col("a") >= 4,
-            id="empty-first",
-            marks=FILTERED_BATCHING,
-        ),
+        pytest.param(pl.col("a") >= 4, [1, 2, 3, 4], id="empty-first"),
 
-        # First read has only two matches: [1, 2].
-        # The reader must still continue to find [3, 4, 5]
-        pytest.param(
-            pl.col("a") >= 1,
-            id="partial-first",
-            marks=FILTERED_BATCHING,
-        ),
+        pytest.param(pl.col("a") >= 1, [1, 2, 3, 4], id="partial-first"),
 
         # First read matches only [0]; later rows match [4, 5]
-        pytest.param(
-            (pl.col("a") == 0) | (pl.col("a") >= 4),
-            id="partial-and-later",
-            marks=FILTERED_BATCHING,
-        ),
+        pytest.param((pl.col("a") == 0) | (pl.col("a") >= 4), [1, 2, 3, 4], id="partial-and-later"),
 
         # Matching rows [2, 3] sit on opposite sides of the read boundary
-        pytest.param(
-            (pl.col("a") >= 2) & (pl.col("a") <= 3),
-            id="boundary-matches",
-            marks=FILTERED_BATCHING,
-        ),
+        pytest.param((pl.col("a") >= 2) & (pl.col("a") <= 3), [1, 2, 3], id="boundary-matches"),
 
         # No rows match. The correct final result is an empty table.
         # This case passed, so it has no expected-failure marker
-        pytest.param(pl.col("a") > 100, id="no-matches"),
+        pytest.param(pl.col("a") > 100, [], id="no-matches"),
     ],
 )
-def test_filtered_batches_do_not_stop_at_empty_or_partial_chunk(arctic_source, predicate):
+def test_filtered_batches_do_not_stop_at_empty_or_partial_chunk(arctic_source, predicate, hint, failing_hints, request):
     """Check that filtered slice sizes do not cause early termination (B2)."""
-    # Use six simple values so three-row read boundaries are easy to see:
-    # first [0, 1, 2], then [3, 4, 5]
+    # Mark only the hints that reproduced the known batching bug.
+    if hint in failing_hints:
+        request.node.add_marker(FILTERED_BATCHING)
+    
     data = pl.DataFrame({"a": [0, 1, 2, 3, 4, 5]})
-
     lib = arctic_source.library
     lib.write("data", data)
 
     # Calculate all matching rows independently using only Polars
     expected = oracle(data, lambda frame: frame.filter(predicate))
 
-    # Every case should exclude some rows (the no-matches case deliberately keeps none)
-    if expected.height >= data.height:
-        raise RuntimeError(
-            "The predicate must remove rows from the test input"
-        )
-
-    # Use a three-row hint and record the reader's emitted batches
-    with override_batch_hint(3) as batches:
+    # Use the selected hint, which may differ from the stored three-row slices
+    with override_batch_hint(hint) as batches:
         # Also record the requests sent to ArcticDB and its returned tables
         with observe_reads() as reads:
             actual = pc.scan_arcticdb(lib, "data", as_of=0).filter(predicate).collect(engine="streaming")
@@ -274,56 +251,90 @@ def test_filtered_limit_reaches_late_matching_rows(arctic_source, request, engin
 
 @pytest.mark.parametrize("batch_size", [None, 2, 3, 20])
 @pytest.mark.parametrize("limit", [0, 1, 3, 20])
-def test_batch_helper_preserves_range_and_limit(arctic_source, sample_data, batch_size, limit):
-    """Check the batching helper with a restricted source range and output limit."""
+def test_lazy_source_range_and_polars_limit(arctic_source, sample_data, batch_size, limit, request):
+    """Preserve a source row range followed by a Polars row limit."""
+
+    # Existing query row ranges interact incorrectly with the reader's
+    # additional limit/batch ranges in these reproduced combinations:
+    failing_cases = {
+        (1, None),
+        (1, 2),
+        (1, 3),
+        (1, 20),
+        (3, None),
+        (3, 2),
+        (3, 3),
+        (3, 20),
+        (20, 2),
+        (20, 3),
+    }
+
+    if (limit, batch_size) in failing_cases:
+        request.node.add_marker(
+            pytest.mark.xfail(
+                reason=(
+                    "Known range/limit bug: backend read ranges are applied "
+                    "before the existing lazy-source row range"
+                ),
+                strict=True,
+                raises=AssertionError,
+            )
+        )
+
     lib = arctic_source.library
     lib.write("data", sample_data)
+
+    # Create an ArcticDB lazy query
     source = lib.read("data", as_of=0, lazy=True, output_format=OutputFormat.POLARS)
 
     # Restrict the source to positions 1 through 4
-    request = source._to_read_request()._replace(row_range=(1, 5))
+    source = source.row_range((1, 5))
 
-    # Run the internal helper directly and collect all batches it yields
-    batches = list(pc._iter_read_request_batches(lib, request, limit, batch_size))
+    with override_batch_hint(batch_size):
+        actual = (
+            pc.scan_arcticdb(source)
+            .head(limit)
+            .collect(engine="streaming")
+        )
 
+    # Calculate the expected range and limit using the original Polars table
     expected = sample_data.slice(1, 4).head(limit)  # head(limit) applies the requested max number of output rows
 
-    # Check all returned values and types, including zero and oversized limits
-    assert_frame_equal(combine(batches, expected.schema), expected)
+    assert_frame_equal(actual, expected)
 
 
-def test_batch_helper_returns_no_rows_beyond_source(arctic_source, sample_data):
-    """Check a source range entirely beyond the stored table."""
+def test_lazy_source_range_beyond_table_is_empty(arctic_source, sample_data):
+    """Return an empty result for a source range beyond the table."""
     lib = arctic_source.library
     lib.write("data", sample_data)
-    source = lib.read("data", as_of=0, lazy=True, output_format=OutputFormat.POLARS)
+
+    source = lib.read("data", lazy=True, output_format=OutputFormat.POLARS)
 
     # The table has 8 rows, so positions 20 to 24 do not exist
-    request = source._to_read_request()._replace(row_range=(20, 25))
-    assert list(pc._iter_read_request_batches(lib, request, 4, 2)) == []
+    source = source.row_range((20, 25))
+
+    with override_batch_hint(2):
+        actual = pc.scan_arcticdb(source).head(4).collect(engine="streaming")
+
+    assert_frame_equal(actual, sample_data.head(0))
 
 
 @FILTERED_BATCHING
 @pytest.mark.parametrize("engine", ["in-memory", "streaming"])
-def test_public_scan_reaches_late_matches_with_engine_hint(tmp_path, engine):
+def test_public_scan_reaches_late_matches_with_engine_hint(library_factory, engine):
     """Check late matches without replacing the engine's batch-size hint."""
-    # Create separate storage because this test needs a larger dataset and a different stored-segment size
-    ac = Arctic(f"lmdb://{tmp_path / 'large_store'}", output_format=OutputFormat.POLARS)
-    lib = ac.create_library("large", library_options=LibraryOptions(rows_per_segment=10_000))
-    enable_polars_writes(lib)
-    
-    try:
-        data = pl.DataFrame({"a": pl.Series(range(100_005), dtype=pl.Int64)})
-        lib.write("data", data)
+    lib = library_factory(library_options=LibraryOptions(rows_per_segment=10_000)).library
 
-        # Only the final five rows match. Early slices can therefore be empty.
-        # Do not override the hint, check what Polars actually supplies
-        actual = pc.scan_arcticdb(lib, "data", as_of=0).filter(pl.col("a") >= 100_000).collect(engine=engine)
+    # Put the matching rows after a large group of nonmatching rows
+    data = pl.DataFrame({"a": pl.Series(range(100_005), dtype=pl.Int64)})
+    lib.write("data", data)
 
-        # Check that the reader reaches and returns those five later rows
-        assert_frame_equal(actual, data.tail(5))
-    finally:
-        ac.delete_library("large")
+    # Only the final five rows match. Early slices can therefore be empty.
+    # Do not override the hint, check what Polars actually supplies
+    actual = pc.scan_arcticdb(lib, "data", as_of=0).filter(pl.col("a") >= 100_000).collect(engine=engine)
+
+    # Check that the reader reaches and returns those five later rows
+    assert_frame_equal(actual, data.tail(5))
 
     # Polars chooses the batch hint here, so it might request the whole table
     # in one read. The other tests force a small hint to test multiple reads
@@ -382,8 +393,26 @@ def test_polars_processing_combines_with_pushdown(arctic_source, sample_data, en
     # Use one read for the in-memory case and a small hint for streaming
     hint = None if engine == "in-memory" else 3
 
-    with override_batch_hint(hint):
-        actual = apply(pc.scan_arcticdb(lib, "data", as_of=0)).collect(engine=engine)
+    with override_batch_hint(hint), observe_reads() as reads:
+        actual = apply(pc.scan_arcticdb(lib, "data")).collect(engine=engine)
 
-    # Check complete group values and types. Losing later input rows can change the averages or remove a desk entirely
+    # Collection must execute at least one ArcticDB read
+    assert reads
+
+    # Each read must include backend query instructions.
+    # This alone does not prove the filter worked; check the returned rows below
+    assert all(read.kwargs["query_builder"] != QueryBuilder() for read in reads)
+
+    # The backend must already have removed nonmatching rows
+    backend = backend_frame(reads)
+    expected_filtered = sample_data.filter(predicate)
+
+    # The columns used by the Polars grouping must be present
+    assert {"desk", "b"}.issubset(backend.columns)
+
+    # Compare the grouping inputs in a fixed column order.
+    # ArcticDB may also return a because the filter needs it
+    assert_frame_equal(backend.select("desk", "b"), expected_filtered.select("desk", "b"))
+
+    # The final grouped result must also be correct
     assert_frame_equal(actual, expected)

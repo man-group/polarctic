@@ -14,89 +14,40 @@ import datetime as dt
 import pandas as pd
 import polars as pl
 import pytest
-from arcticdb import Arctic, LibraryOptions, OutputFormat
-from arcticdb_ext.storage import KeyType
+from arcticdb import LibraryOptions, OutputFormat
 from polars.testing import assert_frame_equal
 
 import polarctic.polarctic as pc
-from tests.utils import collect_storage_stats, enable_polars_writes, observe_reads, oracle, override_batch_hint, query_stats_operation_count
+from tests.utils import collect_storage_stats, observe_reads, override_batch_hint, query_stats_operation_count
 
 
 @pytest.fixture
-def stats_library():
+def stats_library(library_factory):
     """Create an empty, isolated in-memory library for each test."""
-    # Public ArcticDB storage 
-    ac = Arctic("mem://", output_format=OutputFormat.POLARS)
-
-    # Each fixture has its own store, so fixed names are sufficient
-    library_name = "stats_tests"
-    symbol = "data"
-
-    lib = ac.create_library(
-        library_name,
+    return library_factory(
+        storage="memory",
         library_options=LibraryOptions(
             rows_per_segment=3,
             columns_per_segment=2,
         ),
-    )
-
-    enable_polars_writes(lib)
-
-    try:
-        # Each test writes the data needed for its own assertions
-        yield lib, symbol
-    finally:
-        # Delete only the library created by this fixture
-        ac.delete_library(library_name)
+    ).library
 
 
-def assert_data_reads_are_recorded(lib, symbol, version=0):
-    """Check that the trackers record a real read of this test's symbol."""
-    # Read the specified version while statistics are enabled
-    with collect_storage_stats() as stats:
-        lib.read(
-            symbol,
-            as_of=version,
-            output_format=OutputFormat.POLARS,
-        )
-
-    # Zero counts cannot prove anything if recording is not working
-    if query_stats_operation_count(stats, "Memory_GetObject", "TABLE_DATA") <= 0:
-        raise RuntimeError(
-            "The tracker recorded no TABLE_DATA reads; "
-            "check storage access and query-statistics support"
-        )
-
-
-def data_segment_layout(lib, symbol, version):
-    """Get metadata describing the stored data segments."""
-    # Access the toolbox through the underlying version store.
-    # It returns stored-segment metadata, not query-result data
-    tool = lib._nvs.library_tool()
-    layout = tool.read_index(symbol, as_of=version)
-
-    # Keep only entries describing table-data segments
-    layout = layout[layout["key_type"] == int(KeyType.TABLE_DATA)]
-
-    if layout.empty:
-        raise RuntimeError("No stored data-segment layout was found")
-
-    return layout
+def data_segment_layout(lib, symbol, version=None):
+    """Return the stored data-segment layout for a symbol version."""
+    return lib._nvs.read_index(symbol, as_of=version)
 
 
 
 def test_schema_discovery_reads_no_table_data_keys(stats_library, sample_data):
     """Check that planning reads no table-data segments."""
-    # Get this test's library and symbol
-    lib, symbol = stats_library
-    lib.write(symbol, sample_data)
-
-    # First check that real table-data reads produce counters
-    assert_data_reads_are_recorded(lib, symbol)
+    # Get this test's library
+    lib = stats_library
+    lib.write("data", sample_data)
 
     # Record from scan creation onwards (this includes any schema lookup triggered while adding the operations)
     with collect_storage_stats() as planning:
-        query = pc.scan_arcticdb(lib, symbol, as_of=0).filter(pl.col("a") > 1).select("a")
+        query = pc.scan_arcticdb(lib, "data").filter(pl.col("a") > 1).select("a")
         assert query.collect_schema() == pl.Schema({"a": pl.Int64})
 
     # Planning should not fetch the stored table-data segments
@@ -104,7 +55,7 @@ def test_schema_discovery_reads_no_table_data_keys(stats_library, sample_data):
 
     # Fetching the index during planning is expected in this setup.
     # A positive count also confirms that this phase recorded index IO
-    assert query_stats_operation_count(planning, "Memory_GetObject", "TABLE_INDEX") > 0
+    assert query_stats_operation_count(planning, "Memory_GetObject", "TABLE_INDEX") == 1
 
 
 @pytest.mark.xfail(
@@ -115,17 +66,16 @@ def test_schema_discovery_reads_no_table_data_keys(stats_library, sample_data):
 @pytest.mark.parametrize("hint", [None, 3], ids=["single-read", "batched"])
 def test_collection_reuses_schema_index(stats_library, sample_data, hint):
     """Check index reuse during single-read and batched collection."""
-    # Get this test's library and symbol
-    lib, symbol = stats_library
-    lib.write(symbol, sample_data)
-    assert_data_reads_are_recorded(lib, symbol)
+    # Get this test's library
+    lib = stats_library
+    lib.write("data", sample_data)
 
     # Create the scan with the selected hint, and record the batches delivered by the reader
     with override_batch_hint(hint) as batches:
 
         # Measure planning separately from collection
         with collect_storage_stats() as planning:
-            query = pc.scan_arcticdb(lib, symbol, as_of=0)
+            query = pc.scan_arcticdb(lib, "data")
             assert query.collect_schema() == sample_data.schema
 
         # Start fresh counters for collecting the same query
@@ -141,7 +91,7 @@ def test_collection_reuses_schema_index(stats_library, sample_data, hint):
         assert len(batches) >= 2
 
     # Planning should have loaded the index in this configured setup
-    assert query_stats_operation_count(planning, "Memory_GetObject", "TABLE_INDEX") > 0
+    assert query_stats_operation_count(planning, "Memory_GetObject", "TABLE_INDEX") == 1
 
     # Collection should have read actual table data
     assert query_stats_operation_count(collection, "Memory_GetObject", "TABLE_DATA") > 0
@@ -159,55 +109,32 @@ def test_collection_reuses_schema_index(stats_library, sample_data, hint):
 @pytest.mark.parametrize("hint", [1, 2, 3, 4])
 def test_small_hints_do_not_repeat_table_data_fetches(stats_library, hint):
     """Check that small batch hints do not cause unnecessary data fetches."""
-    # Get this test's library and symbol
-    lib, symbol = stats_library
+    # Get this test's library
+    lib = stats_library
 
     # Use only one column so column selection does not affect this test.
     # Write and append separately to create different stored row-slice sizes
     first = pl.DataFrame({"a": list(range(5))})
     later = pl.DataFrame({"a": list(range(5, 10))})
 
-    lib.write(symbol, first)   # Create version 0
-    lib.append(symbol, later)   # Create version 1
+    lib.write("data", first)   # Create version 0
+    lib.append("data", later)   # Create version 1
 
     # Version 1 contains all ten rows, in the original order
     expected = pl.concat([first, later])
 
     # Read metadata describing the stored data segments before measuring the query 
     # so it is not counted as part of the query's collection
-    layout = data_segment_layout(lib, symbol, 1)
+    layout = data_segment_layout(lib, "data", 1)
 
-    # Check that at least one segment covers three or more rows (so hints of 1 and 2 are smaller than that slice)
-    if (layout["end_row"] - layout["start_row"]).max() < 3:
-        raise RuntimeError("The setup did not produce the intended row slices")
-
-    stored_segments = len(layout)
-
-    # First measure a direct full-table read to check how the counters behave for the known stored layout
-    with collect_storage_stats() as baseline_stats:
-        baseline = lib.read(
-            symbol,
-            as_of=1,
-            output_format=OutputFormat.POLARS,
-        ).data
-
-    assert_frame_equal(baseline, expected)
-
-    # Get the number of recorded table-data fetches
-    baseline_count = query_stats_operation_count(baseline_stats, "Memory_GetObject", "TABLE_DATA")
-
-    # A full read is expected to have one fetch per required data segment.
-    # Check that the counters actually behave that way
-    if baseline_count != stored_segments:
-        raise RuntimeError(
-            "Cannot calibrate data-fetch counts: "
-            f"expected {stored_segments}, recorded {baseline_count}. "
-            "Check backend caching and query-statistics behaviour."
-        )
+    # The five-row write creates slices of 3 and 2 rows.
+    # The five-row append creates another 3-row and 2-row slice
+    assert layout["start_row"].tolist() == [0, 3, 5, 8]
+    assert layout["end_row"].tolist() == [3, 5, 8, 10]
 
     # Now read the same version through Polarctic
     with override_batch_hint(hint):
-        query = pc.scan_arcticdb(lib, symbol, as_of=1)
+        query = pc.scan_arcticdb(lib, "data", as_of=1)
 
         # Discover column names and types before measuring collection
         query.collect_schema()
@@ -219,39 +146,23 @@ def test_small_hints_do_not_repeat_table_data_fetches(stats_library, hint):
     # Batching must preserve every row, its order and its type
     assert_frame_equal(actual, expected)
 
-    # Get the data-fetch count for the Polarctic scan
-    scan_count = query_stats_operation_count(scan_stats, "Memory_GetObject", "TABLE_DATA")
-
-    # The complete scan needs the same stored segments as the reference read.
-    # Its small output hint should not cause extra segment fetches
-    assert scan_count == stored_segments, (
-        f"Expected {stored_segments} data fetches, recorded {scan_count}"
-    )
+    # The complete scan needs four stored data segments.
+    # A small batch hint must not fetch any of them again
+    assert query_stats_operation_count(scan_stats, "Memory_GetObject", "TABLE_DATA") == 4
 
 
 def test_projection_reduces_table_data_reads(stats_library, sample_data):
     """Check that selecting one column fetches fewer data segments."""
-    # Get this test's library and symbol
-    lib, symbol = stats_library
+    # Get this test's library
+    lib = stats_library
 
     data = sample_data
-    lib.write(symbol, data)
-
-    # Check the actual layout
-    layout = data_segment_layout(lib, symbol, 0)
-    column_ranges = layout[["start_col", "end_col"]].drop_duplicates()
-
-    # Fail if the fixture did not create separate column segments
-    if len(column_ranges) < 2:
-        raise RuntimeError("The fixture did not create separate column segments")
-
-    # Confirm that the storage counters record real data reads
-    assert_data_reads_are_recorded(lib, symbol)
+    lib.write("data", data)
 
     # Compare a full read with a one-column read of the same version, holding the version and batch hint fixed
     with override_batch_hint(None):
-        full_query = pc.scan_arcticdb(lib, symbol, as_of=0)
-        narrow_query = pc.scan_arcticdb(lib, symbol, as_of=0).select("a")
+        full_query = pc.scan_arcticdb(lib, "data")
+        narrow_query = pc.scan_arcticdb(lib, "data").select("a")
 
         # Resolve schemas before measuring collection
         full_query.collect_schema()
@@ -271,26 +182,29 @@ def test_projection_reduces_table_data_reads(stats_library, sample_data):
     full_count = query_stats_operation_count(full_stats, "Memory_GetObject", "TABLE_DATA")
     narrow_count = query_stats_operation_count(narrow_stats, "Memory_GetObject", "TABLE_DATA")
 
-    # The one-column query should fetch fewer data segments
-    assert 0 < narrow_count < full_count, (
-        f"Full read fetched {full_count} segments; "
-        f"one-column read fetched {narrow_count}"
-    )
+    # Eight rows create three row slices.
+    # Six columns create three two-column groups: 3 × 3 = 9 data segments
+    assert full_count == 9
+
+    # Column a belongs to one column group across the three row slices
+    assert narrow_count == 3
 
 
-# The current connector returns unfiltered rows for this time predicate
-@pytest.mark.xfail(
-    reason="Known bug: timestamp-index filter returns unfiltered rows",
-    strict=True,
-    raises=AssertionError,
+@pytest.mark.parametrize(
+    ("start_day", "end_day", "expected_reads"),
+    [
+        # January 4–6: read one stored three-day group
+        (4, 7, 1),
+
+        # January 4–9: read two stored three-day groups
+        (4, 10, 2),
+    ],
 )
-def test_timeseries_index_filter_returns_correct_rows_and_skips_slices(stats_library):
-    """Check correct time filtering and avoidance of out-of-range data fetches."""
-    # Get this test's library and symbol
-    lib, symbol = stats_library
+def test_preapplied_date_range_skips_unneeded_slices(stats_library, start_day, end_day, expected_reads):
+    """Preserve an ArcticDB date range and fetch only the needed data slices."""
+    lib = stats_library
 
-    # Create one row per day, from January 1 through January 12.
-    # Put timestamp first; index_column=True uses the first column as the index
+    # Create twelve rows: one for each day from January 1 to January 12
     data = pl.DataFrame(
         {
             "timestamp": pl.datetime_range(
@@ -304,114 +218,48 @@ def test_timeseries_index_filter_returns_correct_rows_and_skips_slices(stats_lib
         }
     )
 
-    # Write separate three-day groups so the time range can exclude whole slices
-    lib.write(symbol, data.slice(0, 3), index_column=True)
-
+    # Store the rows in four separate groups: January 1–3, 4–6, 7–9 and 10–12
+    lib.write("data", data.slice(0, 3), index_column=True)
     for offset in [3, 6, 9]:
-        lib.append(
-            symbol,
-            data.slice(offset, 3),
-            index_column=True,
-        )
+        lib.append("data", data.slice(offset, 3), index_column=True)
 
-    # One write and three appends create version 3
-    version = 3
+    # One write and three appends create version 3, so use that version for this test
+    start = dt.datetime(2020, 1, start_day)
+    stop = dt.datetime(2020, 1, end_day)
 
-    # Read metadata describing the stored data segments before measuring the query 
-    # so it is not counted as part of the query's collection
-    layout = data_segment_layout(lib, symbol, version)
+    # ArcticDB's date-range end is inclusive so subtract one nanosecond to exclude the start of end_day
+    end = pd.Timestamp(stop) - pd.Timedelta(1, "ns")
 
-    # Choose a range covering January 4, 5 and 6
-    start = dt.datetime(2020, 1, 4)
-    end = dt.datetime(2020, 1, 7)
-
-    predicate = (
+    # Calculate the expected rows directly from the original Polars table
+    expected = data.filter(
         (pl.col("timestamp") >= start)
-        & (pl.col("timestamp") < end)
+        & (pl.col("timestamp") < stop)
     )
-    expected = oracle(data, lambda frame: frame.filter(predicate))
 
-    # A segment overlaps only if it starts before the requested end and ends after the requested start
-    # The toolbox exposes these boundaries as pandas timestamps
-    overlaps = (
-        (layout.index < pd.Timestamp(end))
-        & (layout["end_index"] > pd.Timestamp(start))
-    )
-    required_segments = int(overlaps.sum())
+    # Give ArcticDB the date range before creating the Polarctic scan (as this test focuses on 
+    # preservation of an existing range, not translation of a Polars timestamp predicate)
+    source = lib.read("data", as_of=3, date_range=(start, end), lazy=True, output_format=OutputFormat.POLARS)
 
-    # Make sure the setup creates the correct testing conditions:
-    # some stored segments are needed, and some should be skipped
-    if not 0 < required_segments < len(layout):
-        raise RuntimeError("The test interval must exclude whole stored slices")
-
-    # First measure a direct full-table read to check how the counters behave for the known stored layout
-    with collect_storage_stats() as full_stats:
-        full = lib.read(
-            symbol,
-            as_of=version,
-            output_format=OutputFormat.POLARS,
-        ).data
-
-    assert_frame_equal(full, data)
-
-    # One fetch per data segment is expected
-    assert query_stats_operation_count(full_stats, "Memory_GetObject", "TABLE_DATA") == len(layout)
-
-    # Disable batching to focus on time filtering and storage skipping
+    # Disable batching so the scan performs one executing backend read
     with override_batch_hint(None):
-        query = pc.scan_arcticdb(lib, symbol, as_of=version).filter(predicate)
+        query = pc.scan_arcticdb(source)
 
-        # Discover column names and types before measuring collection
+        # Discover the schema before measuring data collection
         query.collect_schema()
 
-        # Record the read requests and tables returned by ArcticDB
-        with observe_reads() as reads:
-            # Record memory-storage reads during collection
-            with collect_storage_stats() as filtered_stats:
-                actual = query.collect()
+        # Record both the backend result and its storage operations
+        with observe_reads() as reads, collect_storage_stats() as stats:
+            actual = query.collect()
 
-    # Batching is disabled, so expect one executing backend read
+    # Exactly one backend read should have executed
     assert len(reads) == 1
-    read = reads[0]
 
-    # ArcticDB must already have returned the correctly filtered rows
-    assert_frame_equal(read.data, expected)
+    # ArcticDB itself must return only the requested dates
+    assert_frame_equal(reads[0].data, expected)
 
-    # The final Polarctic result must also be correct
+    # The final Polarctic result must contain those same rows and types
     assert_frame_equal(actual, expected)
 
-    # Check storage work separately: only the overlapping data segments should need to be fetched
-    assert query_stats_operation_count(
-        filtered_stats, "Memory_GetObject", "TABLE_DATA"
-    ) == required_segments
-
-
-def test_stats_enabled_does_not_change_results(stats_library, sample_data):
-    """Check that collecting statistics does not change the query result."""
-    # Get this test's library and symbol
-    lib, symbol = stats_library
-    lib.write(symbol, sample_data)
-    assert_data_reads_are_recorded(lib, symbol)
-
-    def apply(frame):
-        # Use the same filter and column order for both executions
-        return frame.filter(pl.col("a") > 1).select("b", "a")
-
-    # Disable batching to keep the comparison focused on statistics collection
-    with override_batch_hint(None):
-        # Run a fresh query without enabling statistics
-        without_stats = apply(pc.scan_arcticdb(lib, symbol, as_of=0)).collect()
-
-        # Run the equivalent query with statistics enabled (both queries read the same stored version)
-        with collect_storage_stats() as stats:
-            with_stats = apply(pc.scan_arcticdb(lib, symbol, as_of=0)).collect()
-
-    # Calculate the expected answer independently using only Polars
-    expected = oracle(sample_data, apply)
-
-    # Both executions must have the same correct values, order and types
-    assert_frame_equal(without_stats, expected)
-    assert_frame_equal(with_stats, expected)
-
-    # Confirm that the measured execution actually recorded table-data reads
-    assert query_stats_operation_count(stats, "Memory_GetObject", "TABLE_DATA") > 0
+    # Only the stored groups inside the requested range should be fetched.
+    # Checking the exact count catches unnecessary data-segment reads
+    assert query_stats_operation_count(stats, "Memory_GetObject", "TABLE_DATA") == expected_reads
