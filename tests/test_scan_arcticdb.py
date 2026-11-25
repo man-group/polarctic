@@ -151,7 +151,7 @@ def test_lazy_source_normalizes_output_to_polars(arctic_source, sample_data):
 def test_uri_reads_real_store(tmp_path):
     """Check that the URI API opens a real database and reads its data."""
     # Create a separate temporary database for the URI entry-point test
-    uri = f"lmdb://{tmp_path / 'uri_store'}"
+    uri = f"lmdb://{tmp_path / 'uri_store'}?map_size=64MB"
     ac = Arctic(uri)
     lib = ac.create_library("uri_tests")
 

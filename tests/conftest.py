@@ -52,7 +52,7 @@ def init_arcticdb(tmp_path: Path) -> dict[str, Any]:
     lmdb_dir.mkdir(parents=True, exist_ok=True)
     lmdb_path = str(lmdb_dir)
 
-    uri = f"lmdb://{lmdb_path}"
+    uri = f"lmdb://{lmdb_path}?map_size=64MB"
     lib_name = "test_lib"
 
     # Instantiate Arctic and create library
@@ -151,8 +151,9 @@ def library_factory(tmp_path: Path):
         library_name = f"test_library_{number}"
 
         if storage == "lmdb":
-            # Each connection gets a separate local directory
-            uri = f"lmdb://{tmp_path / f'store_{number}'}"
+            # Limit each test store's LMDB map size.
+            # Large map files can exhaust disk space on Windows CI
+            uri = f"lmdb://{tmp_path / f'store_{number}'}?map_size=64MB"
         elif storage == "memory":
             # Each Arctic instance gets an isolated memory store
             uri = "mem://"
