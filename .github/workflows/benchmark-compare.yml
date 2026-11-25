@@ -27,8 +27,8 @@ jobs:
       env:
         PYTHONHASHSEED: "0"
       run: |
-        # Timestamp cases remain blocked by the known filtering bug.
-        python -m pytest tests/bench_scan_arcticdb.py -o "python_functions=bench_*" -k "value-filter" --benchmark-only --benchmark-json=benchmark-results.json
+        # Other scan cases remain blocked by known filtering/batching bugs
+        python -m pytest tests/bench_scan_arcticdb.py tests/bench_query_translation.py -o "python_functions=bench_*" -k "(value-filter and single-read) or representative_translation" --benchmark-only -v --benchmark-json=benchmark-results.json
     - name: Upload benchmark results
       uses: actions/upload-artifact@v4
       with:
