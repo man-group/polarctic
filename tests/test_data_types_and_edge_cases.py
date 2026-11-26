@@ -48,17 +48,9 @@ def test_numeric_widths_and_special_values_are_preserved(lmdb_tiny_segment_sourc
     [
         # Keep rows where text is missing: a values 1 and 3
         pytest.param(pl.col("text").is_null(), id="null"),
-            
+
         # Keep rows where text is present: a values 0 and 2
-        pytest.param(
-            ~pl.col("text").is_null(),
-            id="not-null",
-            marks=pytest.mark.xfail(
-                reason="Known translator bug: negated null filter returns unfiltered rows",
-                strict=True, 
-                raises=AssertionError,
-            ),
-        ),
+        pytest.param(~pl.col("text").is_null(), id="not-null"),
     ]
 )
 def test_null_string_filters_match_polars(lmdb_tiny_segment_source, predicate):
@@ -106,16 +98,8 @@ def test_null_string_filters_match_polars(lmdb_tiny_segment_source, predicate):
         # Keep rows with missing text
         pytest.param(pl.col("text").is_null(), id="null"),
 
-        # Keep rows where text is present (remains a known translator bug on the tests branch)
-        pytest.param(
-            ~pl.col("text").is_null(),
-            id="not-null",
-            marks=pytest.mark.xfail(
-                reason="Known negated-null translation bug",
-                strict=True,
-                raises=AssertionError,
-            ),
-        ),
+        # Keep rows where text is present
+        pytest.param(~pl.col("text").is_null(), id="not-null"),
 
         # Keep rows where text is exactly "x"
         pytest.param(pl.col("text") == "x", id="equals-x"),

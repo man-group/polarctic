@@ -12,7 +12,7 @@ import datetime as dt
 import re
 from collections.abc import Callable, Iterator
 from functools import lru_cache
-from typing import Any, cast, overload
+from typing import Any, NamedTuple, cast, overload
 
 import numpy as np
 import polars as pl
@@ -54,6 +54,7 @@ class PolarsToArcticDBTranslator:
         if expr.startswith("[") and expr.endswith("]"):
             expr = expr[1:-1].strip()
 
+        # Turn Polars' ([ ... ]) grouping into normal ( ... ) brackets
         expr = self._replace_square_brackets(expr)
 
         # Preprocess to handle Polars-specific notation like [dyn int: 2]
@@ -63,6 +64,7 @@ class PolarsToArcticDBTranslator:
         try:
             expr_node = self._process_node(self._parse_expression(expr))
         except SyntaxError as e:
+            # Text Python cannot parse (e.g. timestamps) becomes a ValueError
             raise ValueError(f"Invalid Polars expression: {polars_expr}") from e
 
         return query_builder[expr_node]
@@ -275,26 +277,54 @@ def _get_library_from_uri(uri: str, lib_name: str) -> Library:
     return Arctic(uri).get_library(lib_name)
 
 
+class PushdownFilter(NamedTuple):
+    """The backend query and whether local filtering is needed."""
+
+    query_builder: QueryBuilder | None
+    fallback_to_polars: bool
+
+
 def _translate_predicate(
     predicate: pl.Expr | None,
     query_builder: QueryBuilder | None = None,
-) -> QueryBuilder | None:
+) -> PushdownFilter:
+    """Translate the filter to ArcticDB or request local Polars filtering."""
     if predicate is None:
-        return query_builder
-
-    base_query_builder = query_builder or QueryBuilder()
+        # No filter to apply
+        return PushdownFilter(query_builder, fallback_to_polars=False)
+    
     try:
-        return cast(QueryBuilder, _TRANSLATOR.translate(predicate, base_query_builder))
+        # Turn the Polars filter into an ArcticDB filter
+        translated = _TRANSLATOR.translate(predicate, query_builder or QueryBuilder())
+        return PushdownFilter(cast(QueryBuilder, translated), fallback_to_polars=False)
+    
     except (NotImplementedError, ValueError):
-        # Unsupported predicate for ArcticDB pushdown; fall back to Polars-side filtering
-        return query_builder
+        # TODO: Add optional INFO logging for local filter fallback
+        # Monday: https://man312219.monday.com/boards/7852509418/pulses/13639319069
+        # Keep the existing backend query and apply this filter locally
+        return PushdownFilter(query_builder, fallback_to_polars=True)
 
+
+def _filter_and_yield(
+    frame: pl.DataFrame,
+    fallback_predicate: pl.Expr | None,
+) -> Iterator[pl.DataFrame]:
+    """Apply a local filter when needed and yield only nonempty results."""
+    if fallback_predicate is not None:
+        # ArcticDB did not apply this filter, so apply it using Polars
+        frame = frame.filter(fallback_predicate)
+
+    # Only send non-empty results to Polars
+    if frame.height > 0:
+        yield frame
 
 def _iter_read_request_batches(
     lib: Library,
     read_request: ReadRequest,
     n_rows: int | None,
     batch_size: int | None,
+    *,
+    fallback_predicate: pl.Expr | None = None,
 ) -> Iterator[pl.DataFrame]:
     # Fast path: Polars passes batch_size=None for a plain .collect() (no streaming).
     # Execute a single lib.read() round-trip instead of looping with row_range slices.
@@ -309,8 +339,8 @@ def _iter_read_request_batches(
                 end = min(end, rr.row_range[1])
             rr = rr._replace(row_range=(base_start, end))
         frame = cast(pl.DataFrame, lib.read(**rr._asdict()).data)
-        if frame.height > 0:
-            yield frame
+
+        yield from _filter_and_yield(frame, fallback_predicate)
         return
 
     # Streaming path: yield fixed-size batches so Polars can process them incrementally.
@@ -345,16 +375,23 @@ def _iter_read_request_batches(
 
         batch_request = read_request._replace(row_range=(batch_start, batch_end))
         frame = cast(pl.DataFrame, lib.read(**batch_request._asdict()).data)
-        rows_read = frame.height
 
+        # Count rows before local fallback filtering.
+        # Native ArcticDB filtering may already have removed rows.
+        # TODO: Fix native-filtered empty/short reads in the slice-aligned streaming PR.
+        rows_read = frame.height
         if rows_read == 0:
             break
 
-        yield frame
+        # Local filtering may remove every row.
+        # Skip that output batch, but still advance past the source rows below
+        yield from _filter_and_yield(frame, fallback_predicate)
 
+        # Advance past the backend rows, including those filtered out
         read_offset += rows_read
         if remaining_rows is not None:
             remaining_rows -= rows_read
+
         if rows_read < current_batch_size:
             break
 
@@ -397,11 +434,27 @@ def _register_arctic_source(
         if with_columns is not None:
             read_request = read_request._replace(columns=with_columns)
 
-        translated_predicate = _translate_predicate(predicate, read_request.query_builder)
-        if translated_predicate is not read_request.query_builder:
-            read_request = read_request._replace(query_builder=translated_predicate)
+        # Translate the filter into an ArcticDB filter, if possible
+        pushdown_filter = _translate_predicate(
+            predicate,
+            read_request.query_builder,
+        )
 
-        yield from _iter_read_request_batches(lib, read_request, n_rows, batch_size)
+        # Use the returned builder
+        read_request = read_request._replace(query_builder=pushdown_filter.query_builder)
+
+        # Pass a local filter only when translation failed
+        fallback_predicate = (
+            predicate if pushdown_filter.fallback_to_polars else None
+        )
+
+        yield from _iter_read_request_batches(
+            lib,
+            read_request,
+            n_rows,
+            batch_size,
+            fallback_predicate=fallback_predicate,
+        )
 
     return pl.io.plugins.register_io_source(  # type: ignore[attr-defined]
         io_source=source_generator,
