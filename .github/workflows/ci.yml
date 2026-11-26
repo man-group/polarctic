@@ -27,7 +27,7 @@ jobs:
         # Polarctic supports Python 3.10 and newer
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
 
-        # Test both Polars dependency versions explicitly
+        # Test the known Polars version and the latest compatible release
         polars-version: ["1.35.2", "latest"]
 
     steps:
@@ -38,9 +38,18 @@ jobs:
       with:
         python-version: ${{ matrix.python-version }}
     
-    - name: Install Polarctic and selected Polars version
+    - name: Install Polarctic with pinned Polars
+      if: matrix.polars-version != 'latest'
       run: |
-        python -m pip install --upgrade --upgrade-strategy only-if-needed ".[dev]" "polars${{ matrix.polars-version == 'latest' && '' || format('=={0}', matrix.polars-version) }}"
+        python -m pip install ".[dev]" "polars==${{ matrix.polars-version }}"
+
+    - name: Install Polarctic with latest Polars
+      if: matrix.polars-version == 'latest'
+      run: |
+        python -m pip install --upgrade --upgrade-strategy only-if-needed ".[dev]" polars
+
+    - name: Check installed dependencies
+      run: |
         python -m pip check
 
     - name: Show installed versions
@@ -55,7 +64,7 @@ jobs:
 
     - name: Run all tests
       run: |
-        python -c "import polars; assert polars.__version__ == '${{ matrix.polars-version }}', polars.__version__"
+        python -m pytest tests/ --cov=polarctic --cov-report=xml --cov-report=term --junitxml=test-results.xml
 
     - name: Upload test results
       if: always()
