@@ -18,10 +18,10 @@ from polars.testing import assert_frame_equal
 import polarctic.polarctic as pc
 from tests.utils import observe_reads, oracle, override_batch_hint
 
-def test_scan_returns_lazy_frame_and_complete_schema(arctic_source, sample_data):
+def test_scan_returns_lazy_frame_and_complete_schema(lmdb_tiny_segment_source, sample_data):
     """Check that the Library scan form returns a lazy plan with the expected schema."""
     # Write the test data into the temporary library
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     # Prepare a scan of the first stored version
@@ -41,9 +41,9 @@ def test_scan_returns_lazy_frame_and_complete_schema(arctic_source, sample_data)
     "operation",
     ["read", "filter", "select", "filter_select", "calculate", "group"],
 )
-def test_entry_points_return_expected_polars_data(arctic_source, sample_data, operation):
+def test_entry_points_return_expected_polars_data(lmdb_tiny_segment_source, sample_data, operation):
     """Check complete Polars results for basic operations through the library API."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     # Apply the same Polars operation to the connector's output and the independent reference data
@@ -83,9 +83,9 @@ def test_entry_points_return_expected_polars_data(arctic_source, sample_data, op
     assert_frame_equal(actual, expected)
 
 
-def test_requested_version_is_preserved(arctic_source, sample_data):
+def test_requested_version_is_preserved(lmdb_tiny_segment_source, sample_data):
     """Check explicit version selection and the default latest-version selection."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     changed = sample_data.with_columns(a=pl.col("a") + 100)
@@ -106,24 +106,24 @@ def test_requested_version_is_preserved(arctic_source, sample_data):
     )
 
 
-def test_scan_validates_required_arguments(arctic_source):
+def test_scan_validates_required_arguments(lmdb_tiny_segment_source):
     """Check that missing required arguments and unsupported source types are rejected clearly."""
     # URI input with missing symbol
     with pytest.raises(ValueError, match="lib_name and symbol are required"):
-        pc.scan_arcticdb(arctic_source.uri, arctic_source.library_name)
+        pc.scan_arcticdb(lmdb_tiny_segment_source.uri, lmdb_tiny_segment_source.library_name)
 
     # Library input with a missing symbol
     with pytest.raises(ValueError, match="symbol is required"):
-        pc.scan_arcticdb(arctic_source.library)
+        pc.scan_arcticdb(lmdb_tiny_segment_source.library)
 
     # Unsupported source
     with pytest.raises(TypeError, match="Unsupported source type"):
         pc.scan_arcticdb(123)
 
 
-def test_lazy_source_normalizes_output_to_polars(arctic_source, sample_data):
+def test_lazy_source_normalizes_output_to_polars(lmdb_tiny_segment_source, sample_data):
     """Check that a pandas-output lazy source is read as Polars by the connector."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     # Prepare a source requesting pandas output

@@ -35,9 +35,9 @@ def combine(batches, schema):
 
 
 @pytest.mark.parametrize("hint", [1, 2, 3, 4, 20])
-def test_output_batches_preserve_all_rows(arctic_source, sample_data, hint):
+def test_output_batches_preserve_all_rows(lmdb_tiny_segment_source, sample_data, hint):
     """Check that different batch hints preserve the complete table."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     # Temporarily give newly created scans this batch-size hint.
@@ -88,14 +88,14 @@ def test_output_batches_preserve_all_rows(arctic_source, sample_data, hint):
         pytest.param(pl.col("a") > 100, [], id="no-matches"),
     ],
 )
-def test_filtered_batches_do_not_stop_at_empty_or_partial_chunk(arctic_source, predicate, hint, failing_hints, request):
+def test_filtered_batches_do_not_stop_at_empty_or_partial_chunk(lmdb_tiny_segment_source, predicate, hint, failing_hints, request):
     """Check that filtered slice sizes do not cause early termination (B2)."""
     # Mark only the hints that reproduced the known batching bug.
     if hint in failing_hints:
         request.node.add_marker(FILTERED_BATCHING)
     
     data = pl.DataFrame({"a": [0, 1, 2, 3, 4, 5]})
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", data)
 
     # Calculate all matching rows independently using only Polars
@@ -129,9 +129,9 @@ def test_filtered_batches_do_not_stop_at_empty_or_partial_chunk(arctic_source, p
 
 
 @pytest.mark.parametrize("engine", ["in-memory", "streaming"])
-def test_polars_filter_and_limit_orders_are_distinct(arctic_source, sample_data, engine):
+def test_polars_filter_and_limit_orders_are_distinct(lmdb_tiny_segment_source, sample_data, engine):
     """Check that filtering before and after a limit have different meanings."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     predicate = pl.col("a") > 1
@@ -181,11 +181,11 @@ def test_polars_filter_and_limit_orders_are_distinct(arctic_source, sample_data,
 )
 @pytest.mark.parametrize("limit", [0, 1, 2, 20])
 @pytest.mark.parametrize("fallback", [False, True], ids=["native", "forced-fallback"])
-def test_filtered_limit_reaches_late_matching_rows(arctic_source, request, engine, hint, limit, fallback):
+def test_filtered_limit_reaches_late_matching_rows(lmdb_tiny_segment_source, request, engine, hint, limit, fallback):
     """Check that a limit applies to matching rows, not the first source rows."""
     # Put the matching rows at the end of the input to check that the reader gets past the earlier nonmatching rows
     data = pl.DataFrame({"a": [0, 1, 2, 3, 4, 5], "label": ["a", "b", "c", "d", "e", "f"]})
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("late_matches", data)
 
     # Only a=4 and a=5 match, with labels "e" and "f"
@@ -251,7 +251,7 @@ def test_filtered_limit_reaches_late_matching_rows(arctic_source, request, engin
 
 @pytest.mark.parametrize("batch_size", [None, 2, 3, 20])
 @pytest.mark.parametrize("limit", [0, 1, 3, 20])
-def test_lazy_source_range_and_polars_limit(arctic_source, sample_data, batch_size, limit, request):
+def test_lazy_source_range_and_polars_limit(lmdb_tiny_segment_source, sample_data, batch_size, limit, request):
     """Preserve a source row range followed by a Polars row limit."""
 
     # Existing query row ranges interact incorrectly with the reader's
@@ -281,7 +281,7 @@ def test_lazy_source_range_and_polars_limit(arctic_source, sample_data, batch_si
             )
         )
 
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     # Create an ArcticDB lazy query
@@ -303,9 +303,9 @@ def test_lazy_source_range_and_polars_limit(arctic_source, sample_data, batch_si
     assert_frame_equal(actual, expected)
 
 
-def test_lazy_source_range_beyond_table_is_empty(arctic_source, sample_data):
+def test_lazy_source_range_beyond_table_is_empty(lmdb_tiny_segment_source, sample_data):
     """Return an empty result for a source range beyond the table."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     source = lib.read("data", lazy=True, output_format=OutputFormat.POLARS)
@@ -341,12 +341,12 @@ def test_public_scan_reaches_late_matches_with_engine_hint(library_factory, engi
 
 
 @FILTERED_BATCHING
-def test_streaming_continues_after_full_chunk_then_empty_chunk(arctic_source):
+def test_streaming_continues_after_full_chunk_then_empty_chunk(lmdb_tiny_segment_source):
     """Check full, empty and matching-again slices in the same scan (B2)."""
     # With a three-row hint, this creates three source groups:
     # [0, 1, 2], [3, 4, 5], and [6, 7, 8]
     data = pl.DataFrame({"a": pl.Series(range(9), dtype=pl.Int64)})
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("middle_empty", data)
 
     # With three-row slices: keep 0..2, remove 3..5, then keep 6..8
@@ -368,9 +368,9 @@ def test_streaming_continues_after_full_chunk_then_empty_chunk(arctic_source):
     "in-memory",
     pytest.param("streaming", id="streaming", marks=FILTERED_BATCHING),   # reproduced the early-stopping bug
 ])
-def test_polars_processing_combines_with_pushdown(arctic_source, sample_data, engine):
+def test_polars_processing_combines_with_pushdown(lmdb_tiny_segment_source, sample_data, engine):
     """Check filtering, column selection and Polars grouping in one query."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     predicate = pl.col("a") >= 1

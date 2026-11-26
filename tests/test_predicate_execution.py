@@ -84,10 +84,10 @@ PREDICATE_CASES = [
 ]
 
 @pytest.mark.parametrize("predicate", PREDICATE_CASES)
-def test_predicate_matches_polars(arctic_source, sample_data, predicate):
+def test_predicate_matches_polars(lmdb_tiny_segment_source, sample_data, predicate):
     """Check each filter's result, allowing native execution or Polars fallback."""
     # Write the test data into the temporary library
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     # Calculate the expected result independently using only Polars
@@ -133,9 +133,9 @@ REQUIRED_NATIVE_PREDICATES = [
 ]
 
 @pytest.mark.parametrize("predicate", REQUIRED_NATIVE_PREDICATES)
-def test_required_native_predicate_is_executed_by_arcticdb(arctic_source, sample_data, predicate):
+def test_required_native_predicate_is_executed_by_arcticdb(lmdb_tiny_segment_source, sample_data, predicate):
     """Check that required native filters run in ArcticDB."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     # Calculate the expected result independently using only Polars
@@ -175,9 +175,9 @@ def test_required_native_predicate_is_executed_by_arcticdb(arctic_source, sample
 
 @MISSING_FALLBACK
 @pytest.mark.parametrize("failure_type", [NotImplementedError, ValueError])
-def test_translation_failure_still_filters_rows(arctic_source, sample_data, monkeypatch, failure_type):
+def test_translation_failure_still_filters_rows(lmdb_tiny_segment_source, sample_data, monkeypatch, failure_type):
     """Check that translation failures still produce correctly filtered data through local fallback."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     # Record whether our deliberately failing translator was called
@@ -229,9 +229,9 @@ def test_translation_failure_still_filters_rows(arctic_source, sample_data, monk
         pytest.param("date-method", marks=MISSING_FALLBACK),
     ],
 )
-def test_complex_predicates_preserve_all_conditions(arctic_source, sample_data, monkeypatch, condition):
+def test_complex_predicates_preserve_all_conditions(lmdb_tiny_segment_source, sample_data, monkeypatch, condition):
     """Check that no unsupported expressions and mixed conditions are silently dropped."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     # Remainder arithmetic is unsupported by the current translator
@@ -316,9 +316,9 @@ def test_complex_predicates_preserve_all_conditions(arctic_source, sample_data, 
         ),
     ],
 )
-def test_fallback_preserves_dependencies_and_operation_order(arctic_source, sample_data, engine, operation):
+def test_fallback_preserves_dependencies_and_operation_order(lmdb_tiny_segment_source, sample_data, engine, operation):
     """Check filtering combined with selection, limits and calculations."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     predicate = (pl.col("a") % 2) == 0
@@ -377,9 +377,9 @@ def test_fallback_preserves_dependencies_and_operation_order(arctic_source, samp
 
 # Modulo is unsupported by the translator, so the connector currently loses this combined filter instead of applying it in Polars
 @MISSING_FALLBACK
-def test_time_range_and_unsupported_filter_return_correct_rows(arctic_source, sample_data):
+def test_time_range_and_unsupported_filter_return_correct_rows(lmdb_tiny_segment_source, sample_data):
     """Check that a time condition and numeric conditions remain effective."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     # A row must satisfy both the timestamp condition and the numeric filter

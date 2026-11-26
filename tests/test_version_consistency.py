@@ -52,11 +52,11 @@ from tests.utils import oracle, override_batch_hint
 # while mixed columns can also make joining batches fail
 @pytest.mark.parametrize("change_schema", [False, True], ids=["values-only", "new-column"])
 def test_scan_keeps_one_version_while_writer_publishes_new_data(
-    arctic_source, sample_data, monkeypatch, as_of, write_point, change_schema
+    lmdb_tiny_segment_source, sample_data, monkeypatch, as_of, write_point, change_schema
 ):
     """Keep the original version when a write happens before or between reads."""
     # Write the original table as version 0
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     changed = sample_data.with_columns(a=pl.col("a") + 100)
@@ -138,9 +138,9 @@ def test_scan_keeps_one_version_while_writer_publishes_new_data(
         ),
     ],
 )
-def test_repeated_collection_preserves_query(arctic_source, sample_data, operation):
+def test_repeated_collection_preserves_query(lmdb_tiny_segment_source, sample_data, operation):
     """Collect each operation twice without changing its result."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     # Calculate the expected result using only the original Polars table
@@ -159,9 +159,9 @@ def test_repeated_collection_preserves_query(arctic_source, sample_data, operati
     assert_frame_equal(second_collect, expected)
 
 
-def test_branches_do_not_change_each_other(arctic_source, sample_data):
+def test_branches_do_not_change_each_other(lmdb_tiny_segment_source, sample_data):
     """Keep different branches and their shared source independent."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     with override_batch_hint(None):

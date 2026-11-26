@@ -178,8 +178,8 @@ def library_factory(tmp_path: Path):
 
 
 @pytest.fixture
-def arctic_source(library_factory) -> ArcticSource:
-    """Create an empty temporary ArcticDB library with small segments for connector tests."""
+def lmdb_tiny_segment_source(library_factory) -> ArcticSource:
+    """"Create an empty LMDB library with small row and column segments."""
     return library_factory(
         library_options=LibraryOptions(
             rows_per_segment=3,

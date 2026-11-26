@@ -23,7 +23,7 @@ import polarctic.polarctic as pc
 from tests.utils import oracle, override_batch_hint
 
 
-def test_numeric_widths_and_special_values_are_preserved(arctic_source):
+def test_numeric_widths_and_special_values_are_preserved(lmdb_tiny_segment_source):
     """Check exact numeric types and values through a real stored read."""
     # Give every column an explicit type
     data = pl.DataFrame({
@@ -34,7 +34,7 @@ def test_numeric_widths_and_special_values_are_preserved(arctic_source):
         "double": pl.Series([float("inf"), float("nan"), -float("inf")], dtype=pl.Float64),
     })
 
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("types", data)
 
     actual = pc.scan_arcticdb(lib, "types", as_of=0).collect()
@@ -61,7 +61,7 @@ def test_numeric_widths_and_special_values_are_preserved(arctic_source):
         ),
     ]
 )
-def test_null_string_filters_match_polars(arctic_source, predicate):
+def test_null_string_filters_match_polars(lmdb_tiny_segment_source, predicate):
     """Check that null and non-null filters keep the correct rows."""
     # Create test data and write it into the temporary library
     data = pl.DataFrame(
@@ -71,7 +71,7 @@ def test_null_string_filters_match_polars(arctic_source, predicate):
         }
     )
 
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("nulls", data)
 
     # Calculate the expected answer independently using only Polars
@@ -121,9 +121,9 @@ def test_null_string_filters_match_polars(arctic_source, predicate):
         pytest.param(pl.col("text") == "x", id="equals-x"),
     ],
 )
-def test_sparse_string_columns_across_appended_segments(arctic_source, request, hint, predicate):
+def test_sparse_string_columns_across_appended_segments(lmdb_tiny_segment_source, request, hint, predicate):
     """Read and filter a column missing from the earlier stored rows."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
 
     # The first three rows have no text column
     lib.write("sparse", pl.DataFrame({"a": [0, 1, 2]}))
@@ -186,9 +186,9 @@ def test_sparse_string_columns_across_appended_segments(arctic_source, request, 
 
 @pytest.mark.parametrize("hint", [None, 3], ids=["single-read", "batched"])
 @pytest.mark.parametrize("operation", ["head_zero", "no_matches", "empty_symbol"])
-def test_empty_results_keep_schema(arctic_source, sample_data, operation, hint):
+def test_empty_results_keep_schema(lmdb_tiny_segment_source, sample_data, operation, hint):
     """Check that empty results retain their column names, order and types."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
 
     # Create an empty reference table without losing its column types.
     # head(0) removes all rows but keeps the schema
@@ -220,7 +220,7 @@ def test_empty_results_keep_schema(arctic_source, sample_data, operation, hint):
         assert_frame_equal(query.collect(engine="streaming"), expected)
 
 
-def test_missing_symbol_propagates_arcticdb_error(arctic_source):
+def test_missing_symbol_propagates_arcticdb_error(lmdb_tiny_segment_source):
     """Check that a missing symbol produces an error, not an empty table."""
     # The library is deliberately empty: no setup write is needed
 
@@ -228,12 +228,12 @@ def test_missing_symbol_propagates_arcticdb_error(arctic_source):
     with pytest.raises((NoSuchVersionException, pl.exceptions.ComputeError), match="E_NO_SUCH_VERSION"):
         # The missing symbol may be detected when creating the scan or collecting it. 
         # Keep both steps inside the block so either error is caught
-        pc.scan_arcticdb(arctic_source.library, "missing", as_of=0).collect()
+        pc.scan_arcticdb(lmdb_tiny_segment_source.library, "missing", as_of=0).collect()
 
 
-def test_invalid_column_reports_polars_error(arctic_source, sample_data):
+def test_invalid_column_reports_polars_error(lmdb_tiny_segment_source, sample_data):
     """Check that requesting an unknown column produces an informative error."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     # Require the appropriate Polars error and the requested column name in its message
@@ -242,9 +242,9 @@ def test_invalid_column_reports_polars_error(arctic_source, sample_data):
 
 
 @pytest.mark.parametrize("representation", ["recursive", "pickle"])
-def test_unsupported_stored_representation_reports_clear_error(arctic_source, representation):
+def test_unsupported_stored_representation_reports_clear_error(lmdb_tiny_segment_source, representation):
     """Check informative errors for stored objects that are not normal tables."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
 
     if representation == "recursive":
         # Store a dataframe inside a dictionary (ArcticDB can store this nested structure, but Polarctic
@@ -264,9 +264,9 @@ def test_unsupported_stored_representation_reports_clear_error(arctic_source, re
         pc.scan_arcticdb(lib, "unsupported", as_of=0).collect()
 
 
-def test_read_failure_after_first_batch_is_not_silent(arctic_source, sample_data):
+def test_read_failure_after_first_batch_is_not_silent(lmdb_tiny_segment_source, sample_data):
     """Check that a read failure stops collection instead of returning partial data."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     # Save the real read method and start a read counter
@@ -308,7 +308,7 @@ def test_read_failure_after_first_batch_is_not_silent(arctic_source, sample_data
     assert batches
 
 
-def test_timezone_timestamp_column_matches_stored_polars(arctic_source):
+def test_timezone_timestamp_column_matches_stored_polars(lmdb_tiny_segment_source):
     """Check that Polarctic returns timestamps as ArcticDB returns them."""
     data = pl.DataFrame({
         "a": [0, 1, 2],
@@ -318,7 +318,7 @@ def test_timezone_timestamp_column_matches_stored_polars(arctic_source):
             interval="1d", time_unit="ns", time_zone="Europe/London", eager=True,
         ),
     })
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("timezone", data)
 
     # Read version 0 directly from ArcticDB to get the reference result
@@ -331,9 +331,9 @@ def test_timezone_timestamp_column_matches_stored_polars(arctic_source):
     assert_frame_equal(actual, expected)
 
 
-def test_all_null_string_result_keeps_string_type(arctic_source):
+def test_all_null_string_result_keeps_string_type(lmdb_tiny_segment_source):
     """Check that a string column stays String when its returned values are null."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
 
     # Store two rows containing actual strings
     lib.write("all_null", (pl.DataFrame({"a": [0, 1], "text": ["x", "y"]})))

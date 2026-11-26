@@ -20,10 +20,10 @@ from tests.utils import backend_frame, observe_reads, override_batch_hint
 import pytest
 
 
-def test_predicate_is_executed_by_arcticdb(arctic_source, sample_data):
+def test_predicate_is_executed_by_arcticdb(lmdb_tiny_segment_source, sample_data):
     """Check the backend query and already-filtered backend result."""
     # Write the test data into the temporary library
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     # Build the ArcticDB query and the expected result in Polars
@@ -67,9 +67,9 @@ def test_predicate_is_executed_by_arcticdb(arctic_source, sample_data):
     strict=True,
     raises=AssertionError,
 )
-def test_timeseries_index_predicate_is_executed_by_arcticdb(arctic_source):
+def test_timeseries_index_predicate_is_executed_by_arcticdb(lmdb_tiny_segment_source):
     """Check that ArcticDB applies the filter to the stored datetime index."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
 
     # Create nine daily timestamps, from January 1 to January 9.
     timestamps = pd.date_range("2020-01-01", periods=9, name="timestamp")
@@ -113,9 +113,9 @@ def test_timeseries_index_predicate_is_executed_by_arcticdb(arctic_source):
     assert_frame_equal(actual, expected)
 
 
-def test_projection_is_executed_by_arcticdb(arctic_source, sample_data):
+def test_projection_is_executed_by_arcticdb(lmdb_tiny_segment_source, sample_data):
     """Check requested and returned columns."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     # Record requests and returned data while running the query
@@ -139,9 +139,9 @@ def test_projection_is_executed_by_arcticdb(arctic_source, sample_data):
     assert_frame_equal(actual, sample_data.select("a", "b"))
 
 
-def test_filter_dependency_is_kept_until_filtering(arctic_source, sample_data):
+def test_filter_dependency_is_kept_until_filtering(lmdb_tiny_segment_source, sample_data):
     """Check that filtering can use a column omitted from the final result."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     # Calculate the expected result directly in Polars
@@ -180,9 +180,9 @@ def test_filter_dependency_is_kept_until_filtering(arctic_source, sample_data):
     assert_frame_equal(actual, expected)
 
 
-def test_polars_calculation_is_not_added_to_backend_query(arctic_source, sample_data):
+def test_polars_calculation_is_not_added_to_backend_query(lmdb_tiny_segment_source, sample_data):
     """Check that Polars creates the calculated column after the backend read."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
     
     # Record the backend requests and returned data
@@ -207,9 +207,9 @@ def test_polars_calculation_is_not_added_to_backend_query(arctic_source, sample_
     assert_frame_equal(actual, expected)
 
 
-def test_polars_grouping_is_not_added_to_backend_query(arctic_source, sample_data):
+def test_polars_grouping_is_not_added_to_backend_query(lmdb_tiny_segment_source, sample_data):
     """Check that grouping remains in Polars while the backend request contains no added grouping."""
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     # Record the backend requests and returned data
@@ -242,10 +242,10 @@ def test_polars_grouping_is_not_added_to_backend_query(arctic_source, sample_dat
     assert_frame_equal(actual, expected)
 
 
-def test_planning_does_not_execute_library_read(arctic_source, sample_data):
+def test_planning_does_not_execute_library_read(lmdb_tiny_segment_source, sample_data):
     """Check that planning does not execute a non-lazy Library.read call."""
     # Write the data before recording, so setup is not part of the observation
-    lib = arctic_source.library
+    lib = lmdb_tiny_segment_source.library
     lib.write("data", sample_data)
 
     # Record only the reads made while building the query and discovering its schema
