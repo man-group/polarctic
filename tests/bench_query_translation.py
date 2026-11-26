@@ -3,275 +3,66 @@ Copyright 2026 Man Group Operations Limited
 
 Use of this software is governed by the Business Source License 1.1 included in the file LICENSE
 
-As of the Change Date specified in that file, in accordance with the Business Source
-License, use of this software will be governed by the Apache License, version 2.0.
-
-Execution-focused benchmarks for PolarsToArcticDBTranslator.translate().
-
-Construction-only benchmarks live in tests/bench_query_translation_construction.py.
-
-Run with:
-    pytest tests/bench_query_translation.py -v --benchmark-only
+As of the Change Date specified in that file, in accordance with the Business Source License, use of
+this software will be governed by the Apache License, version 2.0.
 """
 
-from typing import Any
+"""Measure the time to create an ArcticDB QueryBuilder and translate a Polars filter into it."""
 
 import polars as pl
-import pytest
 from arcticdb import QueryBuilder
 
 from polarctic.polarctic import PolarsToArcticDBTranslator
 
 
-@pytest.fixture(scope="module")
-def translator() -> PolarsToArcticDBTranslator:
-    return PolarsToArcticDBTranslator()
+def bench_representative_translation(benchmark):
+    """Measure the time to translate a large filter into an ArcticDB query."""
+    translator = PolarsToArcticDBTranslator()
+
+    # Create 256 small Polars filters:
+    # a > 0, a > 1, a > 2, ..., a > 255.
+    #
+    # Each comparison contains several expression nodes: a column, a number and a comparison operation.
+    # Combining them creates a filter with more than 1000 nodes
+    expressions = [pl.col("a") > value for value in range(256)]
+
+    # Build the same small filters directly in ArcticDB (independent reference for checking the translator)
+    expected = QueryBuilder()
+    backend_expressions = [expected["a"] > value for value in range(256)]
+
+    # Join the filters using AND. Join them in pairs so the expression tree remains shallow
+    while len(expressions) > 1:
+        expressions = [
+            expressions[index] & expressions[index + 1]
+            for index in range(0, len(expressions), 2)
+        ]
+
+        # Combine the matching ArcticDB filters in exactly the same order
+        backend_expressions = [
+            backend_expressions[index] & backend_expressions[index + 1]
+            for index in range(0, len(backend_expressions), 2)
+        ]
+
+    # Only one combined Polars filter remains at the end
+    expression = expressions[0]
+
+    # Add the combined reference filter to the ArcticDB query builder
+    expected = expected[backend_expressions[0]]
+
+    def translate():
+        """Translate the large Polars filter into a new ArcticDB query."""
+        # Start with an empty builder on every call
+        return translator.translate(expression, QueryBuilder())
+
+    # Check correctness before measuring speed
+    assert translate() == expected
+
+    # Time repeated calls to translate().
+    # The correctness check already translated this expression once, so its parsed expression may be cached
+    # Therefore, it measures repeated use, not the first translation of a new expression
+    benchmark(translate)
 
 
-@pytest.fixture(scope="module")
-def exprs() -> dict[str, pl.Expr]:
-    """Build expressions once so timed sections focus on translation work."""
-    return {
-        "greater": pl.col("col1") > 2,
-        "greater_equal": pl.col("col1") >= 2,
-        "less": pl.col("col1") < 2,
-        "less_equal": pl.col("col1") <= 2,
-        "equal": pl.col("col1") == 2,
-        "not_equal": pl.col("col1") != 2,
-        "add": pl.col("col1") + pl.col("col2"),
-        "subtract": pl.col("col1") - pl.col("col2"),
-        "multiply": pl.col("col1") * pl.col("col2"),
-        "divide": pl.col("col1") / pl.col("col2"),
-        "and": (pl.col("col1") > 2) & (pl.col("col2") < 3),
-        "or": (pl.col("col1") > 2) | (pl.col("col2") < 3),
-        "bitwise_and": (pl.col("col1") & 1) == 0,
-        "bitwise_or": (pl.col("col1") | 1) == 3,
-        "bitwise_xor": (pl.col("col1") ^ 1) == 3,
-        "not": ~pl.col("col1"),
-        "negation": -pl.col("col1"),
-        "abs": pl.col("col1").abs(),
-        "is_null": pl.col("col1").is_null(),
-        "is_not_null": ~pl.col("col1").is_null(),
-        "str_contains": pl.col("col1").str.contains("e+"),
-        "isin": pl.col("col1").is_in([24, 42]),
-        "complex_nested": (
-            (pl.col("col1") > 0)
-            & (pl.col("col2") < 100)
-            & ((pl.col("col3") == 5) | (pl.col("col3") == 10))
-        ),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Comparisons
-# ---------------------------------------------------------------------------
-
-
-def bench_greater(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["greater"], QueryBuilder()))
-
-
-def bench_greater_equal(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["greater_equal"], QueryBuilder()))
-
-
-def bench_less(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["less"], QueryBuilder()))
-
-
-def bench_less_equal(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["less_equal"], QueryBuilder()))
-
-
-def bench_equal(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["equal"], QueryBuilder()))
-
-
-def bench_not_equal(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["not_equal"], QueryBuilder()))
-
-
-# ---------------------------------------------------------------------------
-# Arithmetic
-# ---------------------------------------------------------------------------
-
-
-def bench_add(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["add"], QueryBuilder()))
-
-
-def bench_subtract(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["subtract"], QueryBuilder()))
-
-
-def bench_multiply(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["multiply"], QueryBuilder()))
-
-
-def bench_divide(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["divide"], QueryBuilder()))
-
-
-# ---------------------------------------------------------------------------
-# Boolean / bitwise
-# ---------------------------------------------------------------------------
-
-
-def bench_and(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["and"], QueryBuilder()))
-
-
-def bench_or(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["or"], QueryBuilder()))
-
-
-def bench_bitwise_and(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["bitwise_and"], QueryBuilder()))
-
-
-def bench_bitwise_or(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["bitwise_or"], QueryBuilder()))
-
-
-def bench_bitwise_xor(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["bitwise_xor"], QueryBuilder()))
-
-
-def bench_not(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["not"], QueryBuilder()))
-
-
-def bench_negation(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["negation"], QueryBuilder()))
-
-
-# ---------------------------------------------------------------------------
-# Unary / null checks
-# ---------------------------------------------------------------------------
-
-
-def bench_abs(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["abs"], QueryBuilder()))
-
-
-def bench_is_null(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["is_null"], QueryBuilder()))
-
-
-def bench_is_not_null(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["is_not_null"], QueryBuilder()))
-
-
-# ---------------------------------------------------------------------------
-# String / membership
-# ---------------------------------------------------------------------------
-
-
-def bench_str_contains(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["str_contains"], QueryBuilder()))
-
-
-def bench_isin(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    benchmark(lambda: translator.translate(exprs["isin"], QueryBuilder()))
-
-
-# ---------------------------------------------------------------------------
-# Complex / nested expressions
-# ---------------------------------------------------------------------------
-
-
-def bench_complex_nested(
-    benchmark: Any,
-    translator: PolarsToArcticDBTranslator,
-    exprs: dict[str, pl.Expr],
-) -> None:
-    """Three-clause AND/OR expression to stress the recursive tree walk."""
-    benchmark(lambda: translator.translate(exprs["complex_nested"], QueryBuilder()))
+    # Save these labels with the benchmark results
+    benchmark.extra_info["comparison_count"] = 256
+    benchmark.extra_info["measurement"] = "warm repeated translation"

@@ -23,7 +23,7 @@ classifiers = [
 
 dependencies = [
     "polars>=0.20.0",
-    "arcticdb>=4.0.0",
+    "arcticdb>=7.0.0",
     "pyarrow>=21",
 ]
 
