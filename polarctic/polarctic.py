@@ -10,10 +10,9 @@ this software will be governed by the Apache License, version 2.0.
 import ast
 import datetime as dt
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from functools import lru_cache
 from typing import Any, NamedTuple, cast, overload
-
 import numpy as np
 import polars as pl
 from arcticdb import Arctic, LazyDataFrame, OutputFormat, QueryBuilder
@@ -267,7 +266,7 @@ def parse_schema(
         LazyDataFrame,
         lib.read(symbol, as_of=as_of, output_format=OutputFormat.POLARS, lazy=True),
     )
-    return cast(pl.Schema, lazy_source._collect_schema())  # type: ignore[attr-defined]
+    return lazy_source._collect_schema()
 
 
 _TRANSLATOR = PolarsToArcticDBTranslator()
@@ -396,32 +395,21 @@ def _iter_read_request_batches(
             break
 
 
-def _register_arctic_source(
-    lib: Library,
-    schema_getter: Callable[[], pl.Schema],
-    read_request_getter: Callable[[], ReadRequest],
-) -> pl.LazyFrame:
-    # Cache the schema: Polars may call the getter repeatedly during lazy plan
-    # construction (after each .filter(), .select(), etc.).  The schema of a
-    # versioned symbol is immutable, so one call is always sufficient.
-    _cached_schema: pl.Schema | None = None
+def _register_arctic_source(source: LazyDataFrame) -> pl.LazyFrame:
+    """Register a scan using one ArcticDB lazy source and its resolved index."""
+    cached_schema: pl.Schema | None = None
 
     def get_schema() -> pl.Schema:
-        nonlocal _cached_schema
-        if _cached_schema is None:
-            _cached_schema = schema_getter()
-        return _cached_schema
+        nonlocal cached_schema
 
-    _cached_read_request: ReadRequest | None = None
+        if cached_schema is None:
+            # Discover the schema and save the resolved index on source
+            cached_schema = source._collect_schema()
+            assert source._preloaded_index is not None, (
+                "Schema discovery did not provide a preloaded index"
+            )
 
-    def get_base_read_request() -> ReadRequest:
-        nonlocal _cached_read_request
-        if _cached_read_request is None:
-            base = read_request_getter()
-            if base.output_format != OutputFormat.POLARS:
-                base = base._replace(output_format=OutputFormat.POLARS)
-            _cached_read_request = base
-        return _cached_read_request
+        return cached_schema
 
     def source_generator(
         with_columns: list[str] | None,
@@ -429,51 +417,41 @@ def _register_arctic_source(
         n_rows: int | None,
         batch_size: int | None,
     ) -> Iterator[pl.DataFrame]:
-        read_request = get_base_read_request()
+        # Resolve the schema/index
+        get_schema()
+
+        # Build a fresh request containing the source's existing processing
+        read_request = source._to_read_request()
+
+        # Match ArcticDB's LazyDataFrame.collect(): reuse the resolved index
+        read_request = read_request._replace(
+            as_of=source._preloaded_index,
+            output_format=OutputFormat.POLARS,
+        )
 
         if with_columns is not None:
             read_request = read_request._replace(columns=with_columns)
 
-        # Translate the filter into an ArcticDB filter, if possible
-        pushdown_filter = _translate_predicate(
-            predicate,
-            read_request.query_builder,
-        )
+        # Add the new filter to the existing backend query
+        pushdown_filter = _translate_predicate(predicate, read_request.query_builder)
 
         # Use the returned builder
         read_request = read_request._replace(query_builder=pushdown_filter.query_builder)
 
-        # Pass a local filter only when translation failed
-        fallback_predicate = (
-            predicate if pushdown_filter.fallback_to_polars else None
-        )
+        # Apply a local filter only when translation failed
+        fallback_predicate = (predicate if pushdown_filter.fallback_to_polars else None)
 
         yield from _iter_read_request_batches(
-            lib,
+            source.lib,
             read_request,
             n_rows,
             batch_size,
             fallback_predicate=fallback_predicate,
         )
 
-    return pl.io.plugins.register_io_source(  # type: ignore[attr-defined]
+    return pl.io.plugins.register_io_source(
         io_source=source_generator,
         schema=get_schema,
-    )
-
-
-def _scan_lazy_dataframe(source: LazyDataFrame) -> pl.LazyFrame:
-    """Register a Polars IO source backed by an existing ArcticDB LazyDataFrame.
-
-    The LazyDataFrame may already carry ArcticDB-level QueryBuilder operations
-    (projections, filters). Any additional Polars predicates or
-    column selections are pushed down on top of those.
-    """
-
-    return _register_arctic_source(
-        lib=cast(Library, source.lib),
-        schema_getter=lambda: cast(pl.Schema, source._collect_schema()),  # type: ignore[attr-defined]
-        read_request_getter=lambda: cast(ReadRequest, source._to_read_request()),  # type: ignore[attr-defined]
     )
 
 
@@ -537,7 +515,7 @@ def scan_arcticdb(
             raise ValueError("symbol is required when source is a Library")
         symbol = lib_name_or_symbol
     elif isinstance(source, LazyDataFrame):
-        return _scan_lazy_dataframe(source)
+        return _register_arctic_source(source)
     else:
         raise TypeError(f"Unsupported source type: {type(source).__name__}")
 
@@ -551,13 +529,5 @@ def scan_arcticdb(
         ),
     )
 
-    return _register_arctic_source(
-        lib=lib,
-        # Discover the schema through ArcticDB's LazyDataFrame._collect_schema()
-        # without collecting the table data keys
-        schema_getter=lambda: cast(pl.Schema, base_lazy_source._collect_schema()),  # type: ignore[attr-defined]
-        read_request_getter=lambda: cast(
-            ReadRequest,
-            base_lazy_source._to_read_request(),  # type: ignore[attr-defined]
-        ),
-    )
+    # All entry points use the same schema/index handling
+    return _register_arctic_source(base_lazy_source)
